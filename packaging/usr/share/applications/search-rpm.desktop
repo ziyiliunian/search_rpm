@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Search RPM
+Name[zh_CN]=RPM 软件包搜索下载
+Comment=Browse and download RPM packages
+Comment[zh_CN]=浏览、搜索并下载 RPM 软件包
+Exec=search-rpm
+Terminal=false
+Type=Application
+Categories=System;PackageManager;Utility;
+StartupNotify=true
+StartupWMClass=search-rpm

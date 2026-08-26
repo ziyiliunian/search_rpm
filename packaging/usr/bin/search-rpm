@@ -1,0 +1,12 @@
+#!/usr/bin/env python3
+import os
+import sys
+
+BASE_DIR = "/opt/search-rpm"
+if os.path.isdir(BASE_DIR):
+    sys.path.insert(0, BASE_DIR)
+
+from src.main import main
+
+if __name__ == "__main__":
+    raise SystemExit(main())
