@@ -2,7 +2,7 @@
 import os
 import sys
 
-BASE_DIR = "/opt/search-rpm"
+BASE_DIR = "/opt/kylin-server-rpm-search"
 if os.path.isdir(BASE_DIR):
     sys.path.insert(0, BASE_DIR)
 

@@ -1,11 +1,18 @@
-from dataclasses import dataclass
+import bz2
+import gzip
+import lzma
+import re
+import xml.etree.ElementTree as ET
+from dataclasses import asdict, dataclass
 from fnmatch import fnmatchcase
 from html.parser import HTMLParser
 from pathlib import PurePosixPath
 from urllib.parse import urljoin
 from urllib.request import Request, urlopen
-import gzip
-import xml.etree.ElementTree as ET
+
+from .cache import load_cache, save_cache
+
+USER_AGENT = "kylin-server-rpm-search/1.0.0"
 
 
 @dataclass
@@ -17,6 +24,10 @@ class RepoEntry:
     repo: str
     url: str
     summary: str = ""
+    checksum_type: str = ""
+    checksum: str = ""
+    size: int = 0
+    epoch: str = "0"
 
     @property
     def nevra(self):
@@ -35,25 +46,41 @@ class _IndexParser(HTMLParser):
                 self.links.append(href)
 
 
-def fetch_text(url):
-    request = Request(url, headers={"User-Agent": "search-rpm/0.1"})
-    with urlopen(request, timeout=30) as response:
+def fetch_bytes(url, timeout=30):
+    request = Request(url, headers={"User-Agent": USER_AGENT})
+    with urlopen(request, timeout=timeout) as response:
         return response.read()
 
 
-def list_directory(url):
+def list_directory(url, cache_seconds=86400):
+    cached = load_cache("directories", url, cache_seconds)
+    if cached is not None:
+        return [(item[0], item[1]) for item in cached]
     parser = _IndexParser()
-    parser.feed(fetch_text(url).decode("utf-8", "replace"))
-    return [(href.rstrip("/"), urljoin(url, href)) for href in parser.links]
+    parser.feed(fetch_bytes(url).decode("utf-8", "replace"))
+    entries = [(href.rstrip("/"), urljoin(url, href)) for href in parser.links]
+    if cache_seconds > 0:
+        save_cache("directories", url, entries)
+    return entries
 
 
 def _local(tag):
     return tag.rsplit("}", 1)[-1]
 
 
+def _decompress(raw):
+    if raw.startswith(b"\x1f\x8b"):
+        return gzip.decompress(raw)
+    if raw.startswith(b"BZh"):
+        return bz2.decompress(raw)
+    if raw.startswith(b"\xfd7zXZ\x00"):
+        return lzma.decompress(raw)
+    return raw
+
+
 def _primary_from_repomd(base_url):
     repomd_url = urljoin(base_url.rstrip("/") + "/", "repodata/repomd.xml")
-    root = ET.fromstring(fetch_text(repomd_url))
+    root = ET.fromstring(fetch_bytes(repomd_url))
     primary_href = None
     for data in root:
         if data.attrib.get("type") == "primary":
@@ -63,13 +90,16 @@ def _primary_from_repomd(base_url):
                     break
     if not primary_href:
         raise ValueError("repomd.xml 中没有 primary 元数据")
-    raw = fetch_text(urljoin(base_url.rstrip("/") + "/", primary_href))
-    if primary_href.endswith(".gz"):
-        raw = gzip.decompress(raw)
-    return ET.fromstring(raw)
+    raw = fetch_bytes(urljoin(base_url.rstrip("/") + "/", primary_href))
+    return ET.fromstring(_decompress(raw))
 
 
-def load_packages(base_url, repo_name):
+def load_packages(base_url, repo_name, cache_seconds=86400):
+    cache_key = f"{repo_name}|{base_url}"
+    cached = load_cache("packages", cache_key, cache_seconds)
+    if cached is not None:
+        return [RepoEntry(**item) for item in cached]
+
     root = _primary_from_repomd(base_url)
     packages = []
     for package in root.iter():
@@ -77,6 +107,9 @@ def load_packages(base_url, repo_name):
             continue
         values = {}
         location = ""
+        checksum_type = ""
+        checksum = ""
+        size = 0
         for child in package:
             key = _local(child.tag)
             if key in ("name", "arch", "summary"):
@@ -85,8 +118,23 @@ def load_packages(base_url, repo_name):
                 values.update(child.attrib)
             elif key == "location":
                 location = child.attrib.get("href", "")
+            elif key == "checksum" and child.attrib.get("pkgid") == "YES":
+                checksum_type = child.attrib.get("type", "")
+                checksum = (child.text or "").strip()
+            elif key == "size":
+                try:
+                    size = int(child.attrib.get("package", 0))
+                except (TypeError, ValueError):
+                    size = 0
         if values.get("name") and location:
-            packages.append(RepoEntry(values["name"], values.get("ver", ""), values.get("rel", ""), values.get("arch", ""), repo_name, urljoin(base_url.rstrip("/") + "/", location), values.get("summary", "")))
+            packages.append(RepoEntry(
+                values["name"], values.get("ver", ""), values.get("rel", ""),
+                values.get("arch", ""), repo_name,
+                urljoin(base_url.rstrip("/") + "/", location),
+                values.get("summary", ""), checksum_type, checksum, size,
+            ))
+    if cache_seconds > 0:
+        save_cache("packages", cache_key, [asdict(package) for package in packages])
     return packages
 
 
@@ -103,10 +151,47 @@ def parse_rpm_filename(url, repo_name):
     return RepoEntry(name, version, release, arch, repo_name, url)
 
 
-def search_packages(packages, name_query="", version_query="", repo_query=""):
-    def matches(value, query):
-        query = query.strip().lower()
-        if not query or query == "*":
-            return True
-        return fnmatchcase(value.lower(), query) if any(c in query for c in "*?") else query in value.lower()
-    return [p for p in packages if matches(p.name, name_query) and matches(f"{p.version}-{p.release}", version_query) and matches(p.repo, repo_query)]
+def _matches(value, query):
+    query = query.strip().lower()
+    if not query or query == "*":
+        return True
+    if any(character in query for character in "*?"):
+        return fnmatchcase(value.lower(), query)
+    return query in value.lower()
+
+
+def rpm_version_key(value):
+    parts = re.findall(r"[0-9]+|[A-Za-z]+", value)
+    return tuple((0, int(part)) if part.isdigit() else (1, part.lower()) for part in parts)
+
+
+def parse_package_names(text):
+    names = []
+    for line in text.splitlines():
+        line = line.split("#", 1)[0].strip()
+        if line:
+            names.extend(token for token in re.split(r"[\s,;，；]+", line) if token)
+    return list(dict.fromkeys(names))
+
+
+def search_packages(packages, name_query="", version_query="", imported_names=None):
+    queries = [query.strip() for query in (imported_names or []) if query.strip()]
+    if name_query.strip():
+        queries.append(name_query.strip())
+
+    def name_matches(package_name):
+        return not queries or any(_matches(package_name, query) for query in queries)
+
+    results = [
+        package for package in packages
+        if name_matches(package.name)
+        and _matches(f"{package.version}-{package.release}", version_query)
+    ]
+    return sorted(
+        results,
+        key=lambda package: (
+            package.repo.lower(),
+            rpm_version_key(f"{package.epoch}:{package.version}-{package.release}"),
+            package.name.lower(),
+        ),
+    )

@@ -1,5 +1,5 @@
-Package: search-rpm
-Version: 0.1.0
+Package: kylin-server-rpm-search
+Version: 1.0.0
 Section: net
 Priority: optional
 Architecture: all
@@ -7,5 +7,5 @@ Depends: python3 (>= 3.8), python3-pyqt5 (>= 5.14)
 Installed-Size: 1024
 Maintainer: ziyiliunian <316878142@qq.com>
 Homepage: https://github.com/ziyiliunian/search_rpm
-Description: RPM repository browser and downloader
- PyQt5 desktop tool for browsing RPM repositories, searching packages and downloading selected files.
+Description: Kylin Server multi-architecture RPM package downloader
+ PyQt5 desktop tool for browsing Kylin Server RPM repositories, searching packages and downloading selected files.

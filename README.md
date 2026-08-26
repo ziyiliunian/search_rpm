@@ -1,16 +1,51 @@
-# Search RPM
+# 银河麒麟服务器多架构包下载工具
 
-基于 Python + PyQt5 的麒麟软件 RPM 仓库浏览与下载工具。
+版本：`1.0.0`
+
+Debian 包名：`kylin-server-rpm-search`
+
+基于 Python + PyQt5，用于浏览、搜索和批量下载银河麒麟服务器多架构 RPM 软件包。
 
 ## 功能
 
-- 从 `https://update.cs2c.com.cn/NS/V10/` 动态读取系统版本和 OS 目录。
-- 按系统版本、OS 类型、芯片架构选择仓库。
-- 默认选择 `base` 与 `updates`，解析标准 YUM/DNF `repodata/repomd.xml` 和 `primary.xml`。
-- 支持包名模糊搜索和通配符搜索，例如 `kernel*`。
-- 支持版本模糊搜索，例如同时输入包名 `kernel*` 和版本 `89.44`。
-- 支持按仓库名过滤、批量勾选和选择下载目录。
-- 下载使用 Python 标准库，带进度显示和 `.part` 临时文件保护。
+- 按“系统版本 → OS 类型 → 芯片架构 → 软件仓库”完成仓库选择。
+- 默认选择 `V10SP3`、`os`、`aarch64`、`base` 和 `update`。
+- 支持 `aarch64`、`x86_64`、`loongarch64` 等架构。
+- 支持银河麒麟主仓库及 EPEL/EPKL 扩展仓库。
+- 支持包名模糊搜索和 `*`、`?` 通配符。
+- 支持从 UTF-8、UTF-8 BOM 或 GB18030 编码的 TXT 文件导入多个包名。
+- TXT 每行可包含一个或多个包名，支持空格、逗号或分号分隔；`#` 后内容视为注释。
+- 版本筛选为可选项，匹配 `version-release`；结果按仓库、RPM 版本、包名排序。
+- 仓库目录与软件包索引支持不缓存、1 小时、24 小时或 7 天缓存，并可一键清除。
+- 批量下载使用最多 4 个线程，独立弹窗显示每个包和整体任务进度。
+- 关闭下载弹窗不会中断下载，可返回主界面继续搜索并创建其他下载任务。
+- 下载完成前校验文件长度和仓库摘要，失败时删除 `.part` 临时文件。
+
+## 包名导入示例
+
+```text
+# 内核相关包
+kernel*
+kernel-devel kernel-headers
+openssl, curl
+```
+
+手工输入的包名和 TXT 导入的包名按“任意一个匹配”组合。
+
+## 仓库结构
+
+主仓库：
+
+```text
+https://update.cs2c.com.cn/NS/V10/<版本>/<OS类型>/adv/lic/<base|updates>/<架构>/
+```
+
+EPEL/EPKL 扩展仓库：
+
+```text
+https://eps-server.openkylin.top/NS/V10/<版本>/EPKL/main/<架构>/
+https://eps-server.openkylin.top/NS/V10/<版本>/EPKL/update/main/<架构>/
+```
 
 ## 运行
 
@@ -21,32 +56,26 @@ pip install -r requirements.txt
 python3 -m src.main
 ```
 
-如果当前桌面环境缺少 Qt 平台插件，可在无界面环境使用：
+## 打包与安装
 
 ```bash
-QT_QPA_PLATFORM=offscreen python3 -m src.main
+./build.sh 1.0.0
+sudo dpkg -i dist/kylin-server-rpm-search_1.0.0_all.deb
 ```
 
-## 打包 Debian
-
-构建流程参考 `pinginfo` 项目，使用系统 `dpkg-deb`：
+安装后可从应用菜单启动，或运行：
 
 ```bash
-./build.sh 0.1.0
-sudo dpkg -i dist/search-rpm_0.1.0_all.deb
+kylin-server-rpm-search
 ```
 
-安装后可在应用菜单中启动，也可运行 `search-rpm`。
+## 缓存目录
 
-## 说明
-
-目标站点的常见仓库层级为：
+仓库缓存保存于：
 
 ```text
-V10/<版本>/<os 或 sm-os>/adv/lic/<base 或 updates>/<架构>/repodata/
+~/.cache/kylin-server-rpm-search/
 ```
-
-不同版本可能存在目录差异，程序会优先读取目录索引；若服务器目录或元数据不存在，会在状态栏显示错误。
 
 ## 项目地址
 
