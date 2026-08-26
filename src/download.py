@@ -3,10 +3,10 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
-USER_AGENT = "kylin-server-rpm-search/1.0.0"
+USER_AGENT = "kylin-server-rpm-search/1.1.0"
 
 
-def download_package(entry, destination, progress=None):
+def download_package(entry, destination, progress=None, resume_event=None):
     target_dir = Path(destination).expanduser()
     target_dir.mkdir(parents=True, exist_ok=True)
     filename = Path(urlsplit(entry.url).path).name
@@ -27,6 +27,8 @@ def download_package(entry, destination, progress=None):
             expected = entry.size or int(response.headers.get("Content-Length", 0))
             received = 0
             while True:
+                if resume_event is not None:
+                    resume_event.wait()
                 chunk = response.read(1024 * 256)
                 if not chunk:
                     break

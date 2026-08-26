@@ -24,9 +24,11 @@ def _application_icon():
 
 def main():
     app = QApplication(sys.argv)
-    app.setApplicationName(APP_NAME)
+    app.setApplicationName(ICON_NAME)
     app.setApplicationDisplayName(APP_NAME)
     app.setOrganizationName("ziyiliunian")
+    if hasattr(app, "setDesktopFileName"):
+        app.setDesktopFileName(f"{ICON_NAME}.desktop")
     app.setWindowIcon(_application_icon())
     window = MainWindow()
     window.show()

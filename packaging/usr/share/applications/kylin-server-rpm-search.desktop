@@ -10,3 +10,4 @@ Type=Application
 Categories=System;PackageManager;Utility;
 StartupNotify=true
 StartupWMClass=kylin-server-rpm-search
+X-GNOME-WMClass=kylin-server-rpm-search

@@ -1,5 +1,7 @@
 import bz2
 import gzip
+import ctypes
+import ctypes.util
 import lzma
 import re
 import xml.etree.ElementTree as ET
@@ -12,7 +14,7 @@ from urllib.request import Request, urlopen
 
 from .cache import load_cache, save_cache
 
-USER_AGENT = "kylin-server-rpm-search/1.0.0"
+USER_AGENT = "kylin-server-rpm-search/1.1.0"
 
 
 @dataclass
@@ -68,6 +70,32 @@ def _local(tag):
     return tag.rsplit("}", 1)[-1]
 
 
+def _zstd_decompress(raw):
+    library_name = ctypes.util.find_library("zstd")
+    if not library_name:
+        raise RuntimeError("解析 V11 仓库需要系统 libzstd")
+    library = ctypes.CDLL(library_name)
+    library.ZSTD_getFrameContentSize.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    library.ZSTD_getFrameContentSize.restype = ctypes.c_ulonglong
+    library.ZSTD_decompressBound.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    library.ZSTD_decompressBound.restype = ctypes.c_ulonglong
+    library.ZSTD_decompress.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p, ctypes.c_size_t]
+    library.ZSTD_decompress.restype = ctypes.c_size_t
+    library.ZSTD_isError.argtypes = [ctypes.c_size_t]
+    library.ZSTD_isError.restype = ctypes.c_uint
+    source = ctypes.create_string_buffer(raw)
+    size = library.ZSTD_getFrameContentSize(source, len(raw))
+    if size == 2**64 - 1:
+        size = library.ZSTD_decompressBound(source, len(raw))
+    if size in (0, 2**64 - 1, 2**64 - 2) or size > 1024 * 1024 * 1024:
+        raise ValueError("Zstandard 元数据缺少安全的解压长度")
+    destination = ctypes.create_string_buffer(size)
+    result = library.ZSTD_decompress(destination, size, source, len(raw))
+    if library.ZSTD_isError(result):
+        raise ValueError("Zstandard 元数据解压失败")
+    return destination.raw[:result]
+
+
 def _decompress(raw):
     if raw.startswith(b"\x1f\x8b"):
         return gzip.decompress(raw)
@@ -75,6 +103,8 @@ def _decompress(raw):
         return bz2.decompress(raw)
     if raw.startswith(b"\xfd7zXZ\x00"):
         return lzma.decompress(raw)
+    if raw.startswith(b"\x28\xb5\x2f\xfd"):
+        return _zstd_decompress(raw)
     return raw
 
 

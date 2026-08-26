@@ -1,3 +1,4 @@
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from PyQt5.QtCore import QThread, Qt, pyqtSignal
@@ -15,10 +16,11 @@ class DownloadBatchWorker(QThread):
     package_failed = pyqtSignal(int, str)
     batch_finished = pyqtSignal(int, int)
 
-    def __init__(self, entries, destination, max_workers=4):
+    def __init__(self, entries, destination, resume_event, max_workers=4):
         super().__init__()
         self.entries = entries
         self.destination = destination
+        self.resume_event = resume_event
         self.max_workers = max(1, min(max_workers, len(entries), 8))
 
     def run(self):
@@ -30,6 +32,7 @@ class DownloadBatchWorker(QThread):
                 entry,
                 self.destination,
                 lambda done, total: self.package_progress.emit(index, done, total),
+                self.resume_event,
             )
 
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
@@ -49,74 +52,128 @@ class DownloadBatchWorker(QThread):
         self.batch_finished.emit(succeeded, failed)
 
 
-class DownloadProgressDialog(QDialog):
-    all_finished = pyqtSignal(object)
+class DownloadManagerDialog(QDialog):
+    batch_finished = pyqtSignal(object, str, int, int)
 
-    def __init__(self, entries, destination, parent=None, max_workers=4):
+    def __init__(self, parent=None):
         super().__init__(parent, Qt.Window | Qt.WindowTitleHint | Qt.WindowCloseButtonHint)
-        self.entries = entries
-        self.destination = destination
-        self.completed = 0
-        self.setWindowTitle("包下载进度")
-        self.resize(760, 420)
+        self.resume_event = threading.Event()
+        self.resume_event.set()
+        self.workers = []
+        self.total_completed = 0
+        self.setWindowTitle("下载内容")
+        self.resize(820, 460)
         self.setModal(False)
         self._build_ui()
 
-        self.worker = DownloadBatchWorker(entries, destination, max_workers)
-        self.worker.package_progress.connect(self._update_progress)
-        self.worker.package_finished.connect(self._package_finished)
-        self.worker.package_failed.connect(self._package_failed)
-        self.worker.batch_finished.connect(self._batch_finished)
-        self.worker.finished.connect(self.worker.deleteLater)
-        self.worker.start()
-
     def _build_ui(self):
         layout = QVBoxLayout(self)
-        self.summary = QLabel(
-            f"正在使用最多 4 个线程下载 {len(self.entries)} 个软件包。关闭窗口不会中断下载。"
-        )
+        self.summary = QLabel("尚未创建下载任务。")
         layout.addWidget(self.summary)
-        self.table = QTableWidget(len(self.entries), 3)
-        self.table.setHorizontalHeaderLabels(["软件包", "进度", "状态"])
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["软件包", "保存目录", "进度", "状态"])
         self.table.horizontalHeader().setStretchLastSection(True)
-        for row, entry in enumerate(self.entries):
-            self.table.setItem(row, 0, QTableWidgetItem(entry.nevra))
-            progress = QProgressBar()
-            progress.setRange(0, 100)
-            self.table.setCellWidget(row, 1, progress)
-            self.table.setItem(row, 2, QTableWidgetItem("等待下载"))
         layout.addWidget(self.table)
         footer = QHBoxLayout()
         self.overall = QProgressBar()
-        self.overall.setRange(0, len(self.entries))
+        self.overall.setRange(0, 0)
+        self.pause_button = QPushButton("暂停全部")
+        self.pause_button.setEnabled(False)
+        self.pause_button.clicked.connect(self._toggle_pause)
         close_button = QPushButton("关闭并返回主界面")
         close_button.clicked.connect(self.close)
         footer.addWidget(self.overall)
+        footer.addWidget(self.pause_button)
         footer.addWidget(close_button)
         layout.addLayout(footer)
 
+    def add_downloads(self, entries, destination, targets, max_workers=4):
+        start_row = self.table.rowCount()
+        self.table.setRowCount(start_row + len(entries))
+        for index, entry in enumerate(entries):
+            row = start_row + index
+            self.table.setItem(row, 0, QTableWidgetItem(entry.nevra))
+            self.table.setItem(row, 1, QTableWidgetItem(destination))
+            progress = QProgressBar()
+            progress.setRange(0, 100)
+            self.table.setCellWidget(row, 2, progress)
+            self.table.setItem(row, 3, QTableWidgetItem("等待下载"))
+
+        self.overall.setRange(0, self.table.rowCount())
+        self.overall.setValue(self.total_completed)
+        worker = DownloadBatchWorker(entries, destination, self.resume_event, max_workers)
+        worker.package_progress.connect(
+            lambda row, done, total, offset=start_row: self._update_progress(offset + row, done, total)
+        )
+        worker.package_finished.connect(
+            lambda row, path, offset=start_row: self._package_finished(offset + row, path)
+        )
+        worker.package_failed.connect(
+            lambda row, message, offset=start_row: self._package_failed(offset + row, message)
+        )
+        worker.batch_finished.connect(
+            lambda succeeded, failed, batch_targets=targets: self._batch_finished(
+                batch_targets, destination, succeeded, failed
+            )
+        )
+        worker.finished.connect(lambda current=worker: self._worker_stopped(current))
+        self.workers.append(worker)
+        self.summary.setText(
+            f"正在下载，共 {self.table.rowCount()} 个软件包；最多 {max_workers} 个并发线程。"
+        )
+        self.pause_button.setEnabled(True)
+        worker.start()
+
+    def has_active_downloads(self):
+        return any(worker.isRunning() for worker in self.workers)
+
+    def _toggle_pause(self):
+        if self.resume_event.is_set():
+            self.resume_event.clear()
+            self.pause_button.setText("恢复全部")
+            self.summary.setText("下载已暂停。正在读取的数据块完成后进入等待。")
+        else:
+            self.resume_event.set()
+            self.pause_button.setText("暂停全部")
+            self.summary.setText("下载已恢复。")
+
     def _update_progress(self, row, done, total):
-        progress = self.table.cellWidget(row, 1)
+        progress = self.table.cellWidget(row, 2)
         if total:
             progress.setRange(0, 100)
             progress.setValue(min(100, int(done * 100 / total)))
         else:
             progress.setRange(0, 0)
-        self.table.item(row, 2).setText("下载中")
+        self.table.item(row, 3).setText("下载中")
 
     def _package_finished(self, row, path):
-        progress = self.table.cellWidget(row, 1)
+        progress = self.table.cellWidget(row, 2)
         progress.setRange(0, 100)
         progress.setValue(100)
-        self.table.item(row, 2).setText("完成：" + path)
-        self.completed += 1
-        self.overall.setValue(self.completed)
+        self.table.item(row, 3).setText("完成：" + path)
+        self.total_completed += 1
+        self.overall.setValue(self.total_completed)
 
     def _package_failed(self, row, message):
-        self.table.item(row, 2).setText("失败：" + message)
-        self.completed += 1
-        self.overall.setValue(self.completed)
+        self.table.item(row, 3).setText("失败：" + message)
+        self.total_completed += 1
+        self.overall.setValue(self.total_completed)
 
-    def _batch_finished(self, succeeded, failed):
-        self.summary.setText(f"下载任务完成：成功 {succeeded} 个，失败 {failed} 个。")
-        self.all_finished.emit(self)
+    def _batch_finished(self, targets, destination, succeeded, failed):
+        self.batch_finished.emit(targets, destination, succeeded, failed)
+
+    def _worker_stopped(self, worker):
+        if worker in self.workers:
+            self.workers.remove(worker)
+        worker.deleteLater()
+        if not self.has_active_downloads():
+            self.resume_event.set()
+            self.pause_button.setText("暂停全部")
+            self.pause_button.setEnabled(False)
+            self.summary.setText(
+                f"当前任务全部完成：累计处理 {self.total_completed} 个软件包。"
+            )
+
+    def closeEvent(self, event):
+        self.hide()
+        event.ignore()

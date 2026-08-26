@@ -1,31 +1,53 @@
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from PyQt5.QtCore import QSettings, QThread, Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QAbstractItemView, QApplication, QComboBox, QFileDialog, QFormLayout,
     QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-    QMainWindow, QMessageBox, QPushButton, QTableWidget, QTableWidgetItem,
-    QVBoxLayout, QWidget,
+    QMainWindow, QMessageBox, QPushButton, QSplitter, QTableWidget,
+    QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from .cache import clear_cache
-from .download_dialog import DownloadProgressDialog
+from .download_dialog import DownloadManagerDialog
 from .repository import load_packages, parse_package_names, search_packages
 
-MAIN_BASE_URL = "https://update.cs2c.com.cn/NS/V10/"
-EPKL_BASE_URL = "https://eps-server.openkylin.top/NS/V10/"
-VERSIONS = ["V10SP3", "V10SP2", "V10SP1"]
-OS_TYPES = {"V10SP3": ["os", "sm-os"], "V10SP2": ["os"], "V10SP1": ["os"]}
-ARCHES = {
-    "V10SP3": ["aarch64", "x86_64", "loongarch64"],
-    "V10SP2": ["aarch64", "x86_64"],
-    "V10SP1": ["aarch64", "x86_64"],
+NS_BASE_URL = "https://update.cs2c.com.cn/NS/"
+CS_BASE_URL = "https://update.cs2c.com.cn/CS/"
+EPKL_BASE_URL = "https://eps-server.openkylin.top/NS/"
+
+RELEASES = {
+    ("NS", "V10"): ["V10SP1", "V10SP2", "V10SP3", "V10SP3-2403"],
+    ("NS", "V11"): ["2503", "V11SP1-2603"],
+    ("CS", "V10"): ["V10SP3", "V10SP3-2403"],
+    ("CS", "V11"): [],
 }
-MAIN_REPOS = (("base", "base"), ("update", "updates"))
-EPKL_REPOS = (
-    ("EPEL 主源（EPKL/main）", "epkl-main"),
-    ("EPEL 更新源（EPKL/update）", "epkl-update"),
-)
+COMPONENTS = {
+    ("NS", "V10", "V10SP3"): [("os", "os", "standard"), ("sm-os", "sm-os", "standard")],
+    ("NS", "V10", "V10SP3-2403"): [("os", "os", "standard")],
+    ("NS", "V11", "2503"): [("os", "os", "standard")],
+    ("NS", "V11", "V11SP1-2603"): [("os", "os", "standard")],
+    ("CS", "V10", "V10SP3"): [("os（hwy）", "hwy/os", "standard")],
+    ("CS", "V10", "V10SP3-2403"): [
+        ("os（aiplus）", "aiplus/os", "standard"),
+        ("os（ccw）", "ccw/os", "standard"),
+        ("os（lowlatency）", "lowlatency/os", "standard"),
+        ("kernel-4k", "kernel-4k", "direct"),
+    ],
+}
+ARCHES = {
+    ("NS", "V10", "V10SP1"): ["aarch64", "x86_64"],
+    ("NS", "V10", "V10SP2"): ["aarch64", "x86_64"],
+    ("NS", "V10", "V10SP3"): ["aarch64", "x86_64", "loongarch64"],
+    ("NS", "V10", "V10SP3-2403"): ["aarch64", "x86_64", "loongarch64"],
+    ("NS", "V11", "2503"): ["aarch64", "x86_64", "loongarch64"],
+    ("NS", "V11", "V11SP1-2603"): ["aarch64", "x86_64", "loongarch64", "sw_64"],
+    ("CS", "V10", "V10SP3"): ["aarch64", "x86_64"],
+    ("CS", "V10", "V10SP3-2403"): ["aarch64", "x86_64"],
+}
+EPKL_RELEASES = {("V10", item) for item in ("V10SP1", "V10SP2", "V10SP3")}
+EPKL_RELEASES.add(("V11", "2503"))
 CACHE_OPTIONS = (("不使用缓存", 0), ("缓存 1 小时", 3600), ("缓存 24 小时", 86400), ("缓存 7 天", 604800))
 
 
@@ -59,39 +81,55 @@ class MainWindow(QMainWindow):
         self.packages = []
         self.imported_names = []
         self.worker = None
-        self.download_dialogs = []
         self.active_download_targets = set()
+        self.download_manager = DownloadManagerDialog(self)
+        self.download_manager.batch_finished.connect(self._download_finished)
         self.setWindowTitle("银河麒麟服务器多架构包下载工具")
-        self.resize(1220, 780)
+        self.setWindowIcon(QApplication.windowIcon())
+        self.resize(1240, 820)
         self._build_ui()
         self._initialize_options()
 
     def _build_ui(self):
         root = QWidget()
-        layout = QVBoxLayout(root)
+        root_layout = QVBoxLayout(root)
+        splitter = QSplitter(Qt.Vertical)
+        splitter.setChildrenCollapsible(False)
 
+        top = QWidget()
+        top_layout = QVBoxLayout(top)
         workflow = QGroupBox(
-            "工作流程：选择系统版本 → 选择 OS 类型 → 选择芯片架构 → 选择软件仓库 → 输入或导入包名 → 搜索 → 选择目录 → 下载内容"
+            "工作流程：选择产品源 → 系统版本 → 发行版本号 → 系统维护与补丁组件 → 芯片架构 → 软件仓库 → 搜索 → 开始下载 → 下载内容"
         )
         form = QFormLayout(workflow)
-        self.version = QComboBox()
-        self.version.currentTextChanged.connect(self._version_changed)
-        self.os_type = QComboBox()
+        self.source = QComboBox()
+        self.source.addItem("银河麒麟服务器（NS）", "NS")
+        self.source.addItem("中标麒麟服务器（CS）", "CS")
+        self.source.currentIndexChanged.connect(self._source_changed)
+        self.system_version = QComboBox()
+        self.system_version.addItems(["V10", "V11"])
+        self.system_version.currentTextChanged.connect(self._system_version_changed)
+        self.release = QComboBox()
+        self.release.currentTextChanged.connect(self._release_changed)
+        self.component = QComboBox()
+        self.component.currentIndexChanged.connect(self._component_changed)
         self.arch = QComboBox()
         self.repo = QListWidget()
         self.repo.setMaximumHeight(104)
         self.repo.setSelectionMode(QAbstractItemView.MultiSelection)
-        form.addRow("系统版本", self.version)
-        form.addRow("OS 类型", self.os_type)
+        form.addRow("产品源", self.source)
+        form.addRow("系统版本", self.system_version)
+        form.addRow("发行版本号", self.release)
+        form.addRow("系统维护与补丁组件", self.component)
         form.addRow("芯片架构", self.arch)
         form.addRow("软件仓库", self.repo)
-        layout.addWidget(workflow)
+        top_layout.addWidget(workflow)
 
         search = QHBoxLayout()
         self.name_query = QLineEdit()
-        self.name_query.setPlaceholderText("包名，例如 kernel*；也可从 TXT 导入多个包名")
+        self.name_query.setPlaceholderText("包名，例如 kernel*；也可从 TXT 导入")
         self.version_query = QLineEdit()
-        self.version_query.setPlaceholderText("版本模糊匹配（可选），例如 89.44")
+        self.version_query.setPlaceholderText("版本模糊匹配（可选）")
         import_button = QPushButton("从文件导入")
         import_button.clicked.connect(self._import_package_names)
         self.import_status = QLabel("未导入文件")
@@ -102,16 +140,17 @@ class MainWindow(QMainWindow):
         search.addWidget(import_button)
         search.addWidget(self.import_status, 2)
         search.addWidget(self.search_button)
-        layout.addLayout(search)
+        top_layout.addLayout(search)
+        splitter.addWidget(top)
 
+        bottom = QWidget()
+        bottom_layout = QVBoxLayout(bottom)
         self.table = QTableWidget(0, 7)
-        self.table.setHorizontalHeaderLabels(
-            ["选择", "包名", "版本", "架构", "仓库", "简介", "下载地址"]
-        )
+        self.table.setHorizontalHeaderLabels(["选择", "包名", "版本", "架构", "仓库", "简介", "下载地址"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.horizontalHeader().setStretchLastSection(True)
-        layout.addWidget(self.table)
+        bottom_layout.addWidget(self.table)
 
         actions = QHBoxLayout()
         select_all = QPushButton("全选结果")
@@ -121,23 +160,23 @@ class MainWindow(QMainWindow):
         self.destination = QLineEdit(str(Path.home() / "Downloads"))
         choose = QPushButton("选择目录")
         choose.clicked.connect(self._choose_destination)
-        download = QPushButton("下载内容")
-        download.clicked.connect(self._start_download)
-        actions.addWidget(select_all)
-        actions.addWidget(copy_repo)
-        actions.addWidget(QLabel("下载目录"))
-        actions.addWidget(self.destination, 3)
-        actions.addWidget(choose)
-        actions.addWidget(download)
-        layout.addLayout(actions)
+        start_download = QPushButton("开始下载")
+        start_download.clicked.connect(self._start_download)
+        show_downloads = QPushButton("下载内容")
+        show_downloads.clicked.connect(self._show_download_manager)
+        for widget in (select_all, copy_repo, QLabel("下载目录"), self.destination, choose, start_download, show_downloads):
+            actions.addWidget(widget)
+        bottom_layout.addLayout(actions)
+        splitter.addWidget(bottom)
+        splitter.setSizes([330, 490])
+        root_layout.addWidget(splitter)
 
         cache_row = QHBoxLayout()
         self.cache_policy = QComboBox()
         for text, seconds in CACHE_OPTIONS:
             self.cache_policy.addItem(text, seconds)
         saved_cache = self.settings.value("cache_seconds", 86400, type=int)
-        index = self.cache_policy.findData(saved_cache)
-        self.cache_policy.setCurrentIndex(index if index >= 0 else 2)
+        self.cache_policy.setCurrentIndex(max(0, self.cache_policy.findData(saved_cache)))
         self.cache_policy.currentIndexChanged.connect(self._save_cache_policy)
         clear_button = QPushButton("清除缓存")
         clear_button.clicked.connect(self._clear_cache)
@@ -145,19 +184,19 @@ class MainWindow(QMainWindow):
         cache_row.addWidget(self.cache_policy)
         cache_row.addWidget(clear_button)
         cache_row.addStretch()
-        layout.addLayout(cache_row)
-
+        root_layout.addLayout(cache_row)
         self.status = QLabel("就绪")
-        layout.addWidget(self.status)
+        root_layout.addWidget(self.status)
         self.setCentralWidget(root)
 
     def _initialize_options(self):
-        self.version.addItems(VERSIONS)
-        self.version.setCurrentText("V10SP3")
-        self._version_changed("V10SP3")
+        self.source.setCurrentIndex(0)
+        self.system_version.setCurrentText("V10")
+        self._system_version_changed("V10")
+        self.release.setCurrentText("V10SP3")
 
     @staticmethod
-    def _set_combo(combo, values, preferred):
+    def _set_combo(combo, values, preferred=""):
         combo.blockSignals(True)
         combo.clear()
         combo.addItems(values)
@@ -165,21 +204,55 @@ class MainWindow(QMainWindow):
         combo.setCurrentIndex(index if index >= 0 else 0)
         combo.blockSignals(False)
 
-    def _version_changed(self, version):
-        self._set_combo(self.os_type, OS_TYPES.get(version, ["os"]), "os")
-        arches = ARCHES.get(version, ["aarch64", "x86_64"])
-        self._set_combo(self.arch, arches, "aarch64")
+    def _source_key(self):
+        return self.source.currentData() or "NS"
+
+    def _source_changed(self):
+        if self._source_key() == "CS" and self.system_version.currentText() == "V11":
+            self.system_version.setCurrentText("V10")
+        self._system_version_changed(self.system_version.currentText())
+
+    def _system_version_changed(self, system_version):
+        releases = RELEASES.get((self._source_key(), system_version), [])
+        self._set_combo(self.release, releases, "V10SP3" if system_version == "V10" else "2503")
+        if releases:
+            self._release_changed(self.release.currentText())
+        else:
+            self.component.clear()
+            self.arch.clear()
+            self.repo.clear()
+            self.status.setText("当前产品源暂未提供该系统版本")
+
+    def _release_changed(self, release):
+        key = (self._source_key(), self.system_version.currentText(), release)
+        components = COMPONENTS.get(key, [("os", "os", "standard")])
+        self.component.blockSignals(True)
+        self.component.clear()
+        for display, path, layout in components:
+            self.component.addItem(display, (path, layout))
+        self.component.setCurrentIndex(0)
+        self.component.blockSignals(False)
+        self._set_combo(self.arch, ARCHES.get(key, ["aarch64", "x86_64"]), "aarch64")
+        self._component_changed()
+
+    def _component_changed(self):
+        source = self._source_key()
+        system_version = self.system_version.currentText()
+        release = self.release.currentText()
+        component_data = self.component.currentData() or ("os", "standard")
+        layout = component_data[1]
         self.repo.clear()
-        for display, key in MAIN_REPOS + EPKL_REPOS:
+        repositories = [("组件仓库", "direct")] if layout == "direct" else [("base", "base"), ("update", "updates")]
+        if source == "NS" and (system_version, release) in EPKL_RELEASES:
+            repositories += [("EPEL 主源", "epkl-main"), ("EPEL 更新源", "epkl-update")]
+        for display, key in repositories:
             item = QListWidgetItem(display)
             item.setData(Qt.UserRole, key)
             self.repo.addItem(item)
-            item.setSelected(key in {"base", "updates"})
+            item.setSelected(key in {"base", "updates", "direct"})
 
     def _import_package_names(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "导入包名文件", str(Path.home()), "文本文件 (*.txt);;所有文件 (*)"
-        )
+        path, _ = QFileDialog.getOpenFileName(self, "导入包名文件", str(Path.home()), "文本文件 (*.txt);;所有文件 (*)")
         if not path:
             return
         try:
@@ -194,25 +267,30 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "导入失败", str(exc))
             return
         self.imported_names = parse_package_names(text)
-        self.import_status.setText(f"已导入 {len(self.imported_names)} 个包名：{Path(path).name}")
+        self.import_status.setText(f"已导入 {len(self.imported_names)} 个：{Path(path).name}")
         self.import_status.setToolTip("\n".join(self.imported_names))
 
     def _repo_urls(self):
-        version = self.version.currentText()
-        os_type = self.os_type.currentText()
+        source = self._source_key()
+        system_version = self.system_version.currentText()
+        release = self.release.currentText()
         arch = self.arch.currentText()
+        component_path, layout = self.component.currentData() or ("os", "standard")
+        root = NS_BASE_URL if source == "NS" else CS_BASE_URL
         urls = []
         for item in self.repo.selectedItems():
             key = item.data(Qt.UserRole)
-            if key in {"base", "updates"}:
-                url = f"{MAIN_BASE_URL}{version}/{os_type}/adv/lic/{key}/{arch}/"
+            if key == "direct":
+                url = f"{root}{system_version}/{release}/{component_path}/{arch}/"
+            elif key in {"base", "updates"}:
+                url = f"{root}{system_version}/{release}/{component_path}/adv/lic/{key}/{arch}/"
             elif key == "epkl-main":
-                url = f"{EPKL_BASE_URL}{version}/EPKL/main/{arch}/"
+                url = f"{EPKL_BASE_URL}{system_version}/{release}/EPKL/main/{arch}/"
             elif key == "epkl-update":
-                url = f"{EPKL_BASE_URL}{version}/EPKL/update/main/{arch}/"
+                url = f"{EPKL_BASE_URL}{system_version}/{release}/EPKL/update/main/{arch}/"
             else:
                 continue
-            urls.append((url, key))
+            urls.append((url, f"{source.lower()}-{key}"))
         return urls
 
     def _search(self):
@@ -233,9 +311,7 @@ class MainWindow(QMainWindow):
 
     def _on_loaded(self, packages):
         self.packages = packages
-        results = search_packages(
-            packages, self.name_query.text(), self.version_query.text(), self.imported_names
-        )
+        results = search_packages(packages, self.name_query.text(), self.version_query.text(), self.imported_names)
         self._show_results(results)
         self.status.setText(f"索引包含 {len(packages)} 个包，匹配 {len(results)} 个")
 
@@ -250,7 +326,6 @@ class MainWindow(QMainWindow):
             self.worker = None
 
     def _show_results(self, results):
-        self.table.setSortingEnabled(False)
         self.table.setRowCount(0)
         for entry in results:
             row = self.table.rowCount()
@@ -259,18 +334,12 @@ class MainWindow(QMainWindow):
             check.setCheckState(Qt.Unchecked)
             check.setData(Qt.UserRole, entry)
             self.table.setItem(row, 0, check)
-            values = (
-                entry.name, f"{entry.version}-{entry.release}", entry.arch,
-                entry.repo, entry.summary, entry.url,
-            )
+            values = (entry.name, f"{entry.version}-{entry.release}", entry.arch, entry.repo, entry.summary, entry.url)
             for column, value in enumerate(values, 1):
                 self.table.setItem(row, column, QTableWidgetItem(value))
 
     def _select_all(self):
-        state = Qt.Checked if any(
-            self.table.item(row, 0).checkState() == Qt.Unchecked
-            for row in range(self.table.rowCount())
-        ) else Qt.Unchecked
+        state = Qt.Checked if any(self.table.item(row, 0).checkState() == Qt.Unchecked for row in range(self.table.rowCount())) else Qt.Unchecked
         for row in range(self.table.rowCount()):
             self.table.item(row, 0).setCheckState(state)
 
@@ -311,34 +380,28 @@ class MainWindow(QMainWindow):
         destination_path = str(Path(destination).expanduser().resolve())
         accepted = []
         targets = set()
-        duplicates = 0
         for entry in entries:
-            filename = entry.url.rstrip("/").split("/")[-1].split("?", 1)[0]
+            filename = Path(urlsplit(entry.url).path).name
             target = (destination_path, filename)
-            if target in self.active_download_targets or target in targets:
-                duplicates += 1
+            if not filename or target in self.active_download_targets or target in targets:
                 continue
             targets.add(target)
             accepted.append(entry)
         if not accepted:
             QMessageBox.information(self, "提示", "所选软件包已经在下载任务中。")
             return
-        if duplicates:
-            self.status.setText(f"已跳过 {duplicates} 个目标文件重复的软件包")
         self.active_download_targets.update(targets)
-        dialog = DownloadProgressDialog(accepted, destination_path, self, max_workers=4)
-        dialog.download_targets = targets
-        self.download_dialogs.append(dialog)
-        dialog.all_finished.connect(self._download_finished)
-        dialog.show()
-        dialog.raise_()
-        dialog.activateWindow()
+        self.download_manager.add_downloads(accepted, destination_path, targets, max_workers=4)
+        self.status.setText(f"已开始下载 {len(accepted)} 个软件包；可点击“下载内容”查看进度")
 
-    def _download_finished(self, dialog):
-        self.active_download_targets.difference_update(dialog.download_targets)
-        if dialog in self.download_dialogs:
-            self.download_dialogs.remove(dialog)
-        self.status.setText(f"一个下载任务已完成，保存目录：{dialog.destination}")
+    def _show_download_manager(self):
+        self.download_manager.show()
+        self.download_manager.raise_()
+        self.download_manager.activateWindow()
+
+    def _download_finished(self, targets, destination, succeeded, failed):
+        self.active_download_targets.difference_update(targets)
+        self.status.setText(f"下载批次完成：成功 {succeeded}，失败 {failed}；目录：{destination}")
 
     def _save_cache_policy(self):
         self.settings.setValue("cache_seconds", self.cache_policy.currentData())
@@ -351,15 +414,13 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "清除缓存失败", str(exc))
 
     def closeEvent(self, event):
-        if self.active_download_targets:
-            QMessageBox.information(
-                self, "下载仍在进行",
-                "仍有下载任务在后台运行。请等待任务完成后再退出；可关闭下载进度弹窗并继续使用主界面。",
-            )
+        if self.download_manager.has_active_downloads():
+            QMessageBox.information(self, "下载仍在进行", "仍有下载任务在后台运行，请等待完成后再退出。")
             event.ignore()
             return
         if self.worker and self.worker.isRunning():
             QMessageBox.information(self, "索引正在加载", "请等待当前仓库索引加载完成后再退出。")
             event.ignore()
             return
+        self.download_manager.accept()
         event.accept()
