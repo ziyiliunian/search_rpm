@@ -14,7 +14,7 @@ from urllib.request import Request, urlopen
 
 from .cache import load_cache, save_cache
 
-USER_AGENT = "kylin-server-rpm-search/1.2.0"
+USER_AGENT = "kylin-server-rpm-search/1.3.0"
 
 
 @dataclass
@@ -209,12 +209,24 @@ def search_packages(packages, name_query="", version_query="", imported_names=No
     if name_query.strip():
         queries.append(name_query.strip())
 
-    def name_matches(package_name):
-        return not queries or any(_matches(package_name, query) for query in queries)
+    def query_matches(package, query):
+        normalized = query.strip().lower()
+        rpm_filename = PurePosixPath(package.url.split("?", 1)[0]).name.lower()
+        nevra = package.nevra.lower()
+        if normalized in {nevra, rpm_filename, rpm_filename[:-4] if rpm_filename.endswith(".rpm") else rpm_filename}:
+            return True
+        if any(character in normalized for character in "*?"):
+            return any(fnmatchcase(candidate, normalized) for candidate in (package.name.lower(), nevra, rpm_filename))
+        if re.search(r"\.(?:noarch|src|aarch64|x86_64|loongarch64|sw_64|ppc64le)$", normalized):
+            return False
+        return normalized in package.name.lower()
+
+    def package_matches(package):
+        return not queries or any(query_matches(package, query) for query in queries)
 
     results = [
         package for package in packages
-        if name_matches(package.name)
+        if package_matches(package)
         and _matches(f"{package.version}-{package.release}", version_query)
     ]
     return sorted(

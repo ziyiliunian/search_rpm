@@ -15,15 +15,32 @@ from .repository import load_packages, parse_package_names, search_packages
 
 SYSTEM_BASE_URL = "https://update.cs2c.com.cn/NS/"
 EPKL_BASE_URL = "https://eps-server.openkylin.top/NS/"
+CS_BASE_URL = "https://update.cs2c.com.cn/CS/"
 
+SOURCE_SYSTEM_VERSIONS = {
+    "SYSTEM": ["V10", "V11"],
+    "EPKL": ["V10", "V11"],
+    "CS": ["V10"],
+}
 RELEASES = {
     ("SYSTEM", "V10"): ["V10SP1", "V10SP2", "V10SP3", "V10SP3-2403"],
     ("SYSTEM", "V11"): ["2503", "V11SP1-2603"],
     ("EPKL", "V10"): ["V10SP1", "V10SP2", "V10SP3", "V10SP3-2403", "HPC", "V10.4-HPC", "V10AIPLUS"],
     ("EPKL", "V11"): ["2503"],
+    ("CS", "V10"): ["V10SP3", "V10SP3-2403"],
 }
 SYSTEM_COMPONENTS = {
-    ("V10", "V10SP3"): [("os", "os"), ("sm-os", "sm-os")],
+    ("V10", "V10SP3"): [("os", "os") , ("sm-os", "sm-os")],
+}
+CS_COMPONENTS = {
+    ("V10", "V10SP3"): [("os（hwy）", "hwy/os", "standard")],
+    ("V10", "V10SP3-2403"): [
+        ("os（aiplus）", "aiplus/os", "standard"),
+        ("os（ccw）", "ccw/os", "standard"),
+        ("os（gazb）", "gazb/os", "standard"),
+        ("os（lowlatency）", "lowlatency/os", "standard"),
+        ("kernel-4k", "kernel-4k", "direct"),
+    ],
 }
 EPKL_MULTI_COMPONENTS = {
     ("V10", "V10SP3"): ["Compiler", "DB", "Storage"],
@@ -49,6 +66,8 @@ ARCHES = {
     ("EPKL", "V10", "V10.4-HPC"): ["aarch64", "x86_64"],
     ("EPKL", "V10", "V10AIPLUS"): ["aarch64", "x86_64"],
     ("EPKL", "V11", "2503"): ["aarch64", "x86_64", "loongarch64"],
+    ("CS", "V10", "V10SP3"): ["aarch64", "x86_64"],
+    ("CS", "V10", "V10SP3-2403"): ["aarch64", "x86_64"],
 }
 CACHE_OPTIONS = (("不使用缓存", 0), ("缓存 1 小时", 3600), ("缓存 24 小时", 86400), ("缓存 7 天", 604800))
 
@@ -107,9 +126,9 @@ class MainWindow(QMainWindow):
         self.source = QComboBox()
         self.source.addItem("系统源（update.cs2c.com.cn/NS）", "SYSTEM")
         self.source.addItem("EPKL 源（eps-server.openkylin.top/NS）", "EPKL")
+        self.source.addItem("CS 源（update.cs2c.com.cn/CS）", "CS")
         self.source.currentIndexChanged.connect(self._source_changed)
         self.system_version = QComboBox()
-        self.system_version.addItems(["V10", "V11"])
         self.system_version.currentTextChanged.connect(self._system_version_changed)
         self.release = QComboBox()
         self.release.currentTextChanged.connect(self._release_changed)
@@ -193,8 +212,7 @@ class MainWindow(QMainWindow):
 
     def _initialize_options(self):
         self.source.setCurrentIndex(0)
-        self.system_version.setCurrentText("V10")
-        self._system_version_changed("V10")
+        self._source_changed()
         self.release.setCurrentText("V10SP3")
 
     @staticmethod
@@ -210,6 +228,8 @@ class MainWindow(QMainWindow):
         return self.source.currentData() or "SYSTEM"
 
     def _source_changed(self):
+        versions = SOURCE_SYSTEM_VERSIONS.get(self._source_key(), ["V10"])
+        self._set_combo(self.system_version, versions, "V10")
         self._system_version_changed(self.system_version.currentText())
 
     def _system_version_changed(self, system_version):
@@ -233,6 +253,10 @@ class MainWindow(QMainWindow):
             components = SYSTEM_COMPONENTS.get((system_version, release), [("os", "os")])
             for display, path in components:
                 self.component.addItem(display, (path, "system"))
+        elif source == "CS":
+            components = CS_COMPONENTS.get((system_version, release), [])
+            for display, path, layout in components:
+                self.component.addItem(display, (path, layout))
         else:
             self.component.addItem("标准软件包", ("", "standard"))
             for component in EPKL_MULTI_COMPONENTS.get((system_version, release), []):
@@ -248,8 +272,10 @@ class MainWindow(QMainWindow):
         release = self.release.currentText()
         component_data = self.component.currentData() or ("os", "system")
         self.repo.clear()
-        if source == "SYSTEM":
+        if source == "SYSTEM" or (source == "CS" and component_data[1] == "standard"):
             repositories = [("base", "base"), ("update", "updates")]
+        elif source == "CS" and component_data[1] == "direct":
+            repositories = [("组件仓库", "direct")]
         elif component_data[1] == "multi":
             self._set_combo(self.arch, ["aarch64", "x86_64"], "aarch64")
             repositories = [("multi_version", "multi-version")]
@@ -300,6 +326,13 @@ class MainWindow(QMainWindow):
                     f"{SYSTEM_BASE_URL}{system_version}/{release}/{component_path}"
                     f"/adv/lic/{repository}/{arch}/"
                 )
+            elif source == "CS" and layout == "standard":
+                url = (
+                    f"{CS_BASE_URL}{system_version}/{release}/{component_path}"
+                    f"/adv/lic/{repository}/{arch}/"
+                )
+            elif source == "CS" and layout == "direct":
+                url = f"{CS_BASE_URL}{system_version}/{release}/{component_path}/{arch}/"
             elif layout == "multi" and repository == "multi-version":
                 url = (
                     f"{EPKL_BASE_URL}{system_version}/{release}/EPKL/multi_version/"

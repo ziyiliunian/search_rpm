@@ -1,5 +1,20 @@
 # 修改记录
 
+## [1.3.0] - 2026-08-27
+
+### 新增
+
+- 产品源增加 `https://update.cs2c.com.cn/CS/`。
+- CS 源独立提供 V10、V10SP3/V10SP3-2403、维护组件、架构和仓库联动。
+- CS 支持 `hwy`、`aiplus`、`ccw`、`gazb`、`lowlatency` 和 `kernel-4k` 实际仓库。
+
+### 修复
+
+- 修复 TXT 中完整 `name-version-release.arch` 无法匹配的问题。
+- 完整 NEVRA 和 RPM 文件名改为精确匹配，避免 `satyr` 误命中 `python2-satyr`。
+- 保持纯包名和通配符的模糊搜索行为。
+- 软件、网络请求标识和 Debian 包版本更新为 `1.3.0`。
+
 ## [1.2.0] - 2026-08-27
 
 ### 变更
