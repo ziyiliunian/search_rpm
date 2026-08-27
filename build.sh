@@ -2,7 +2,7 @@
 set -e
 cd "$(dirname "$0")"
 APP_NAME="kylin-server-rpm-search"
-VERSION="${1:-1.1.0}"
+VERSION="${1:-1.2.0}"
 OUT_DIR="dist"
 mkdir -p build
 PKGROOT=$(mktemp -d "build/pkgroot.${VERSION}.XXXXXX")

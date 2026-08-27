@@ -14,7 +14,7 @@ from urllib.request import Request, urlopen
 
 from .cache import load_cache, save_cache
 
-USER_AGENT = "kylin-server-rpm-search/1.1.0"
+USER_AGENT = "kylin-server-rpm-search/1.2.0"
 
 
 @dataclass
