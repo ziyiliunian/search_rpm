@@ -10,6 +10,19 @@ from PyQt5.QtWidgets import (
 from .download import download_package
 
 
+def _safe_error_message(message):
+    lowered = message.lower()
+    if "timed out" in lowered or "timeout" in lowered:
+        return "网络连接超时"
+    if "checksum" in lowered or "摘要" in message:
+        return "文件摘要校验失败"
+    if "长度" in message:
+        return "文件长度校验失败"
+    if "https" in lowered:
+        return "下载地址不安全或不可用"
+    return "下载失败，请检查网络和仓库状态"
+
+
 class DownloadBatchWorker(QThread):
     package_progress = pyqtSignal(int, int, int)
     package_finished = pyqtSignal(int, str)
@@ -138,24 +151,39 @@ class DownloadManagerDialog(QDialog):
             self.summary.setText("下载已恢复。")
 
     def _update_progress(self, row, done, total):
+        if row < 0 or row >= self.table.rowCount():
+            return
         progress = self.table.cellWidget(row, 2)
+        status_item = self.table.item(row, 3)
+        if progress is None or status_item is None:
+            return
         if total:
             progress.setRange(0, 100)
             progress.setValue(min(100, int(done * 100 / total)))
         else:
             progress.setRange(0, 0)
-        self.table.item(row, 3).setText("下载中")
+        status_item.setText("下载中")
 
     def _package_finished(self, row, path):
+        if row < 0 or row >= self.table.rowCount():
+            return
         progress = self.table.cellWidget(row, 2)
+        status_item = self.table.item(row, 3)
+        if progress is None or status_item is None:
+            return
         progress.setRange(0, 100)
         progress.setValue(100)
-        self.table.item(row, 3).setText("完成：" + path)
+        status_item.setText("完成：" + path)
         self.total_completed += 1
         self.overall.setValue(self.total_completed)
 
     def _package_failed(self, row, message):
-        self.table.item(row, 3).setText("失败：" + message)
+        if row < 0 or row >= self.table.rowCount():
+            return
+        status_item = self.table.item(row, 3)
+        if status_item is None:
+            return
+        status_item.setText("失败：" + _safe_error_message(message))
         self.total_completed += 1
         self.overall.setValue(self.total_completed)
 

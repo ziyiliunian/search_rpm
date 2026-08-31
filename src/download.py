@@ -3,24 +3,27 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
-USER_AGENT = "kylin-server-rpm-search/1.3.0"
+USER_AGENT = "kylin-server-rpm-search/1.4.0"
 
 
 def download_package(entry, destination, progress=None, resume_event=None):
     target_dir = Path(destination).expanduser()
     target_dir.mkdir(parents=True, exist_ok=True)
-    filename = Path(urlsplit(entry.url).path).name
+    parsed_url = urlsplit(entry.url)
+    if parsed_url.scheme != "https" or not parsed_url.hostname:
+        raise ValueError("RPM 下载地址必须是有效 HTTPS URL")
+    filename = Path(parsed_url.path).name
     if not filename:
         raise ValueError("下载地址中没有有效文件名")
+    if not entry.checksum_type or not entry.checksum:
+        raise ValueError("仓库未提供 RPM 摘要，拒绝不安全下载")
     target = target_dir / filename
     temporary = target.with_suffix(target.suffix + ".part")
     request = Request(entry.url, headers={"User-Agent": USER_AGENT})
-    digest = None
-    if entry.checksum_type:
-        try:
-            digest = hashlib.new(entry.checksum_type)
-        except ValueError:
-            digest = None
+    try:
+        digest = hashlib.new(entry.checksum_type)
+    except ValueError as exc:
+        raise ValueError("仓库使用了不支持的 RPM 摘要算法") from exc
 
     try:
         with urlopen(request, timeout=60) as response, temporary.open("wb") as output:

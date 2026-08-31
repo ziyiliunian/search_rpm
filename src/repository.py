@@ -1,20 +1,24 @@
 import bz2
-import gzip
 import ctypes
 import ctypes.util
+import gzip
+import io
 import lzma
+import posixpath
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass
 from fnmatch import fnmatchcase
-from html.parser import HTMLParser
 from pathlib import PurePosixPath
-from urllib.parse import urljoin
+from urllib.parse import unquote, urljoin, urlsplit
 from urllib.request import Request, urlopen
 
 from .cache import load_cache, save_cache
 
-USER_AGENT = "kylin-server-rpm-search/1.3.0"
+USER_AGENT = "kylin-server-rpm-search/1.4.0"
+MAX_REPOMD_BYTES = 4 * 1024 * 1024
+MAX_COMPRESSED_METADATA_BYTES = 256 * 1024 * 1024
+MAX_DECOMPRESSED_METADATA_BYTES = 512 * 1024 * 1024
 
 
 @dataclass
@@ -36,34 +40,38 @@ class RepoEntry:
         return f"{self.name}-{self.version}-{self.release}.{self.arch}"
 
 
-class _IndexParser(HTMLParser):
-    def __init__(self):
-        super().__init__()
-        self.links = []
-
-    def handle_starttag(self, tag, attrs):
-        if tag.lower() == "a":
-            href = dict(attrs).get("href")
-            if href and href not in ("../", "./"):
-                self.links.append(href)
-
-
-def fetch_bytes(url, timeout=30):
+def fetch_bytes(url, timeout=30, max_bytes=MAX_COMPRESSED_METADATA_BYTES):
+    parsed = urlsplit(url)
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise ValueError("仓库地址必须是有效 HTTPS URL")
     request = Request(url, headers={"User-Agent": USER_AGENT})
     with urlopen(request, timeout=timeout) as response:
-        return response.read()
+        content_length = int(response.headers.get("Content-Length", 0))
+        if content_length > max_bytes:
+            raise ValueError("仓库元数据超过允许大小")
+        chunks = []
+        received = 0
+        while True:
+            chunk = response.read(min(1024 * 1024, max_bytes - received + 1))
+            if not chunk:
+                break
+            received += len(chunk)
+            if received > max_bytes:
+                raise ValueError("仓库元数据超过允许大小")
+            chunks.append(chunk)
+        return b"".join(chunks)
 
 
-def list_directory(url, cache_seconds=86400):
-    cached = load_cache("directories", url, cache_seconds)
-    if cached is not None:
-        return [(item[0], item[1]) for item in cached]
-    parser = _IndexParser()
-    parser.feed(fetch_bytes(url).decode("utf-8", "replace"))
-    entries = [(href.rstrip("/"), urljoin(url, href)) for href in parser.links]
-    if cache_seconds > 0:
-        save_cache("directories", url, entries)
-    return entries
+def _safe_repository_url(base_url, href):
+    base = urlsplit(base_url.rstrip("/") + "/")
+    target = urlsplit(urljoin(base.geturl(), href))
+    normalized_path = posixpath.normpath(unquote(target.path))
+    base_path = posixpath.normpath(unquote(base.path))
+    if target.scheme != "https" or target.netloc != base.netloc:
+        raise ValueError("仓库元数据地址越界")
+    if normalized_path != base_path and not normalized_path.startswith(base_path.rstrip("/") + "/"):
+        raise ValueError("仓库元数据路径越界")
+    return target.geturl()
 
 
 def _local(tag):
@@ -87,7 +95,7 @@ def _zstd_decompress(raw):
     size = library.ZSTD_getFrameContentSize(source, len(raw))
     if size == 2**64 - 1:
         size = library.ZSTD_decompressBound(source, len(raw))
-    if size in (0, 2**64 - 1, 2**64 - 2) or size > 1024 * 1024 * 1024:
+    if size in (0, 2**64 - 1, 2**64 - 2) or size > MAX_DECOMPRESSED_METADATA_BYTES:
         raise ValueError("Zstandard 元数据缺少安全的解压长度")
     destination = ctypes.create_string_buffer(size)
     result = library.ZSTD_decompress(destination, size, source, len(raw))
@@ -96,21 +104,41 @@ def _zstd_decompress(raw):
     return destination.raw[:result]
 
 
+def _bounded_stream_decompress(raw, opener):
+    output = bytearray()
+    with opener(io.BytesIO(raw)) as stream:
+        while True:
+            chunk = stream.read(min(1024 * 1024, MAX_DECOMPRESSED_METADATA_BYTES - len(output) + 1))
+            if not chunk:
+                return bytes(output)
+            output.extend(chunk)
+            if len(output) > MAX_DECOMPRESSED_METADATA_BYTES:
+                raise ValueError("仓库元数据解压后超过允许大小")
+
+
 def _decompress(raw):
     if raw.startswith(b"\x1f\x8b"):
-        return gzip.decompress(raw)
+        return _bounded_stream_decompress(
+            raw, lambda stream: gzip.GzipFile(fileobj=stream, mode="rb")
+        )
     if raw.startswith(b"BZh"):
-        return bz2.decompress(raw)
+        return _bounded_stream_decompress(
+            raw, lambda stream: bz2.BZ2File(stream, mode="rb")
+        )
     if raw.startswith(b"\xfd7zXZ\x00"):
-        return lzma.decompress(raw)
+        return _bounded_stream_decompress(
+            raw, lambda stream: lzma.LZMAFile(stream, mode="rb")
+        )
     if raw.startswith(b"\x28\xb5\x2f\xfd"):
         return _zstd_decompress(raw)
+    if len(raw) > MAX_DECOMPRESSED_METADATA_BYTES:
+        raise ValueError("仓库元数据超过允许大小")
     return raw
 
 
 def _primary_from_repomd(base_url):
-    repomd_url = urljoin(base_url.rstrip("/") + "/", "repodata/repomd.xml")
-    root = ET.fromstring(fetch_bytes(repomd_url))
+    repomd_url = _safe_repository_url(base_url, "repodata/repomd.xml")
+    root = ET.fromstring(fetch_bytes(repomd_url, max_bytes=MAX_REPOMD_BYTES))
     primary_href = None
     for data in root:
         if data.attrib.get("type") == "primary":
@@ -120,7 +148,8 @@ def _primary_from_repomd(base_url):
                     break
     if not primary_href:
         raise ValueError("repomd.xml 中没有 primary 元数据")
-    raw = fetch_bytes(urljoin(base_url.rstrip("/") + "/", primary_href))
+    primary_url = _safe_repository_url(base_url, primary_href)
+    raw = fetch_bytes(primary_url, max_bytes=MAX_COMPRESSED_METADATA_BYTES)
     return ET.fromstring(_decompress(raw))
 
 
@@ -128,7 +157,14 @@ def load_packages(base_url, repo_name, cache_seconds=86400):
     cache_key = f"{repo_name}|{base_url}"
     cached = load_cache("packages", cache_key, cache_seconds)
     if cached is not None:
-        return [RepoEntry(**item) for item in cached]
+        packages = []
+        for item in cached:
+            entry = RepoEntry(**item)
+            if not entry.checksum_type or not entry.checksum:
+                continue
+            _safe_repository_url(base_url, entry.url)
+            packages.append(entry)
+        return packages
 
     root = _primary_from_repomd(base_url)
     packages = []
@@ -156,12 +192,13 @@ def load_packages(base_url, repo_name, cache_seconds=86400):
                     size = int(child.attrib.get("package", 0))
                 except (TypeError, ValueError):
                     size = 0
-        if values.get("name") and location:
+        if values.get("name") and location and checksum_type and checksum:
+            package_url = _safe_repository_url(base_url, location)
             packages.append(RepoEntry(
                 values["name"], values.get("ver", ""), values.get("rel", ""),
-                values.get("arch", ""), repo_name,
-                urljoin(base_url.rstrip("/") + "/", location),
+                values.get("arch", ""), repo_name, package_url,
                 values.get("summary", ""), checksum_type, checksum, size,
+                values.get("epoch", "0"),
             ))
     if cache_seconds > 0:
         save_cache("packages", cache_key, [asdict(package) for package in packages])

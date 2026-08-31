@@ -1,6 +1,6 @@
 # 银河麒麟服务器多架构包下载工具
 
-版本：`1.3.0`
+版本：`1.4.0`
 
 Debian 包名：`kylin-server-rpm-search`
 
@@ -30,8 +30,9 @@ https://eps-server.openkylin.top/NS/
 
 - V10 发行版包括 `V10SP1`、`V10SP2`、`V10SP3`、`V10SP3-2403`、`HPC`、`V10.4-HPC`、`V10AIPLUS`。
 - V11 当前提供 `2503`。
-- 标准软件包仓库为 `main`、`update`；部分发行版仅提供 `main`。
-- 已确认的 `multi_version` 组件作为“系统维护与补丁组件”显示：
+- 新增独立“EPKL 仓库分类”下拉：`main`、`update`、`multi_version`。
+- 选择 `main` 或 `update` 后，维护组件显示“标准软件包”。
+- 选择 `multi_version` 后，维护组件下拉显示该发行版实际可用组件：
   - V10SP3、V10SP3-2403：`Compiler`、`DB`、`Storage`。
   - V11 2503：`AI`。
 - EPKL 各发行版的架构、组件和仓库选项与系统源独立，不互相套用。
@@ -66,7 +67,8 @@ https://update.cs2c.com.cn/CS/
 - 仓库索引支持不缓存、1 小时、24 小时或 7 天缓存。
 - 选择区和结果区可上下拖动调整大小。
 - “开始下载”创建后台任务，“下载内容”查看、暂停或恢复任务。
-- 最多 4 个线程并发下载，并校验文件长度与仓库摘要。
+- 最多 4 个线程并发下载，并强制使用 HTTPS、校验文件长度与仓库摘要。
+- 仓库元数据具有下载大小、解压大小、URL 边界和缓存完整性校验。
 
 ## 运行
 
@@ -80,8 +82,8 @@ python3 -m src.main
 ## 打包与安装
 
 ```bash
-./build.sh 1.3.0
-sudo dpkg -i dist/kylin-server-rpm-search_1.3.0_all.deb
+./build.sh 1.4.0
+sudo dpkg -i dist/kylin-server-rpm-search_1.4.0_all.deb
 ```
 
 安装后可从应用菜单启动，或运行 `kylin-server-rpm-search`。

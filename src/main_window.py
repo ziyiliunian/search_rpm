@@ -120,7 +120,7 @@ class MainWindow(QMainWindow):
         top = QWidget()
         top_layout = QVBoxLayout(top)
         workflow = QGroupBox(
-            "工作流程：选择产品源 → 系统版本 → 发行版本号 → 系统维护与补丁组件 → 芯片架构 → 软件仓库 → 搜索 → 开始下载 → 下载内容"
+            "工作流程：选择产品源 → 系统版本 → 发行版本号 → EPKL 仓库分类 → 系统维护与补丁组件 → 芯片架构 → 软件仓库 → 搜索 → 开始下载 → 下载内容"
         )
         form = QFormLayout(workflow)
         self.source = QComboBox()
@@ -132,6 +132,8 @@ class MainWindow(QMainWindow):
         self.system_version.currentTextChanged.connect(self._system_version_changed)
         self.release = QComboBox()
         self.release.currentTextChanged.connect(self._release_changed)
+        self.epkl_category = QComboBox()
+        self.epkl_category.currentIndexChanged.connect(self._epkl_category_changed)
         self.component = QComboBox()
         self.component.currentIndexChanged.connect(self._component_changed)
         self.arch = QComboBox()
@@ -141,6 +143,8 @@ class MainWindow(QMainWindow):
         form.addRow("产品源", self.source)
         form.addRow("系统版本", self.system_version)
         form.addRow("发行版本号", self.release)
+        self.epkl_category_label = QLabel("EPKL 仓库分类")
+        form.addRow(self.epkl_category_label, self.epkl_category)
         form.addRow("系统维护与补丁组件", self.component)
         form.addRow("芯片架构", self.arch)
         form.addRow("软件仓库", self.repo)
@@ -247,23 +251,54 @@ class MainWindow(QMainWindow):
         source = self._source_key()
         system_version = self.system_version.currentText()
         key = (source, system_version, release)
+        is_epkl = source == "EPKL"
+        self.epkl_category_label.setVisible(is_epkl)
+        self.epkl_category.setVisible(is_epkl)
+        self.epkl_category.blockSignals(True)
+        self.epkl_category.clear()
+        if is_epkl:
+            standard_repositories = EPKL_REPOSITORIES.get(
+                (system_version, release), [("main", "main"), ("update", "update")]
+            )
+            for display, repository in standard_repositories:
+                self.epkl_category.addItem(display, (repository, "standard"))
+            if EPKL_MULTI_COMPONENTS.get((system_version, release)):
+                self.epkl_category.addItem("multi_version", ("multi-version", "multi"))
+        self.epkl_category.setCurrentIndex(0)
+        self.epkl_category.blockSignals(False)
+        self._set_combo(self.arch, ARCHES.get(key, ["aarch64", "x86_64"]), "aarch64")
+        if is_epkl:
+            self._epkl_category_changed()
+            return
         self.component.blockSignals(True)
         self.component.clear()
         if source == "SYSTEM":
             components = SYSTEM_COMPONENTS.get((system_version, release), [("os", "os")])
             for display, path in components:
                 self.component.addItem(display, (path, "system"))
-        elif source == "CS":
+        else:
             components = CS_COMPONENTS.get((system_version, release), [])
             for display, path, layout in components:
                 self.component.addItem(display, (path, layout))
-        else:
-            self.component.addItem("标准软件包", ("", "standard"))
-            for component in EPKL_MULTI_COMPONENTS.get((system_version, release), []):
-                self.component.addItem(f"多版本组件：{component}", (component, "multi"))
         self.component.setCurrentIndex(0)
         self.component.blockSignals(False)
-        self._set_combo(self.arch, ARCHES.get(key, ["aarch64", "x86_64"]), "aarch64")
+        self._component_changed()
+
+    def _epkl_category_changed(self):
+        if self._source_key() != "EPKL":
+            return
+        category = self.epkl_category.currentData() or ("main", "standard")
+        system_version = self.system_version.currentText()
+        release = self.release.currentText()
+        self.component.blockSignals(True)
+        self.component.clear()
+        if category[1] == "multi":
+            for component in EPKL_MULTI_COMPONENTS.get((system_version, release), []):
+                self.component.addItem(component, (component, "multi"))
+        else:
+            self.component.addItem("标准软件包", (category[0], "epkl-standard"))
+        self.component.setCurrentIndex(0)
+        self.component.blockSignals(False)
         self._component_changed()
 
     def _component_changed(self):
@@ -284,9 +319,8 @@ class MainWindow(QMainWindow):
                 (source, system_version, release), ["aarch64", "x86_64"]
             )
             self._set_combo(self.arch, release_arches, "aarch64")
-            repositories = EPKL_REPOSITORIES.get(
-                (system_version, release), [("main", "main"), ("update", "update")]
-            )
+            repository = component_data[0]
+            repositories = [(repository, repository)]
         for display, key in repositories:
             item = QListWidgetItem(display)
             item.setData(Qt.UserRole, key)
@@ -338,9 +372,9 @@ class MainWindow(QMainWindow):
                     f"{EPKL_BASE_URL}{system_version}/{release}/EPKL/multi_version/"
                     f"{component_path}/{arch}/"
                 )
-            elif repository == "main":
+            elif layout == "epkl-standard" and repository == "main":
                 url = f"{EPKL_BASE_URL}{system_version}/{release}/EPKL/main/{arch}/"
-            elif repository == "update":
+            elif layout == "epkl-standard" and repository == "update":
                 url = f"{EPKL_BASE_URL}{system_version}/{release}/EPKL/update/main/{arch}/"
             else:
                 continue
