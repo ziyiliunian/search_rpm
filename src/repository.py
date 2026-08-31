@@ -9,13 +9,16 @@ import re
 import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass
 from fnmatch import fnmatchcase
+from html.parser import HTMLParser
 from pathlib import PurePosixPath
 from urllib.parse import unquote, urljoin, urlsplit
 from urllib.request import Request, urlopen
 
-from .cache import load_cache, save_cache
+from .cache import (
+    cache_is_valid, cache_writer, iter_cache_items, write_cache_item,
+)
 
-USER_AGENT = "kylin-server-rpm-search/1.4.0"
+USER_AGENT = "kylin-server-rpm-search/1.5.0"
 MAX_REPOMD_BYTES = 4 * 1024 * 1024
 MAX_COMPRESSED_METADATA_BYTES = 256 * 1024 * 1024
 MAX_DECOMPRESSED_METADATA_BYTES = 512 * 1024 * 1024
@@ -38,6 +41,18 @@ class RepoEntry:
     @property
     def nevra(self):
         return f"{self.name}-{self.version}-{self.release}.{self.arch}"
+
+
+class _DirectoryParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.links = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag.lower() == "a":
+            href = dict(attrs).get("href")
+            if href and href not in ("../", "./"):
+                self.links.append(href)
 
 
 def fetch_bytes(url, timeout=30, max_bytes=MAX_COMPRESSED_METADATA_BYTES):
@@ -72,6 +87,39 @@ def _safe_repository_url(base_url, href):
     if normalized_path != base_path and not normalized_path.startswith(base_path.rstrip("/") + "/"):
         raise ValueError("仓库元数据路径越界")
     return target.geturl()
+
+
+def list_directory(url, cache_seconds=86400):
+    cache_key = f"directory|{url}"
+    if cache_is_valid("directories", cache_key, cache_seconds):
+        return [item["name"] for item in iter_cache_items("directories", cache_key, cache_seconds)]
+    parser = _DirectoryParser()
+    parser.feed(fetch_bytes(url, max_bytes=4 * 1024 * 1024).decode("utf-8", "replace"))
+    names = []
+    seen = set()
+    with cache_writer("directories", cache_key, cache_seconds > 0) as stream:
+        for href in parser.links:
+            if not href.endswith("/"):
+                continue
+            safe_url = _safe_repository_url(url, href)
+            name = PurePosixPath(urlsplit(safe_url).path.rstrip("/")).name
+            if name and name not in seen:
+                seen.add(name)
+                names.append(name)
+                write_cache_item(stream, {"name": name})
+    return names
+
+
+def has_repomd(url):
+    try:
+        fetch_bytes(
+            _safe_repository_url(url, "repodata/repomd.xml"),
+            timeout=15,
+            max_bytes=MAX_REPOMD_BYTES,
+        )
+        return True
+    except Exception:
+        return False
 
 
 def _local(tag):
@@ -136,7 +184,7 @@ def _decompress(raw):
     return raw
 
 
-def _primary_from_repomd(base_url):
+def _primary_bytes_from_repomd(base_url):
     repomd_url = _safe_repository_url(base_url, "repodata/repomd.xml")
     root = ET.fromstring(fetch_bytes(repomd_url, max_bytes=MAX_REPOMD_BYTES))
     primary_href = None
@@ -150,59 +198,66 @@ def _primary_from_repomd(base_url):
         raise ValueError("repomd.xml 中没有 primary 元数据")
     primary_url = _safe_repository_url(base_url, primary_href)
     raw = fetch_bytes(primary_url, max_bytes=MAX_COMPRESSED_METADATA_BYTES)
-    return ET.fromstring(_decompress(raw))
+    return _decompress(raw)
 
 
-def load_packages(base_url, repo_name, cache_seconds=86400):
+def _entry_from_package(package, base_url, repo_name):
+    values = {}
+    location = ""
+    checksum_type = ""
+    checksum = ""
+    size = 0
+    for child in package:
+        key = _local(child.tag)
+        if key in ("name", "arch", "summary"):
+            values[key] = (child.text or "").strip()
+        elif key == "version":
+            values.update(child.attrib)
+        elif key == "location":
+            location = child.attrib.get("href", "")
+        elif key == "checksum" and child.attrib.get("pkgid") == "YES":
+            checksum_type = child.attrib.get("type", "")
+            checksum = (child.text or "").strip()
+        elif key == "size":
+            try:
+                size = int(child.attrib.get("package", 0))
+            except (TypeError, ValueError):
+                size = 0
+    if not values.get("name") or not location or not checksum_type or not checksum:
+        return None
+    return RepoEntry(
+        values["name"], values.get("ver", ""), values.get("rel", ""),
+        values.get("arch", ""), repo_name, _safe_repository_url(base_url, location),
+        values.get("summary", ""), checksum_type, checksum, size,
+        values.get("epoch", "0"),
+    )
+
+
+def iter_packages(base_url, repo_name, cache_seconds=86400):
     cache_key = f"{repo_name}|{base_url}"
-    cached = load_cache("packages", cache_key, cache_seconds)
-    if cached is not None:
-        packages = []
-        for item in cached:
+    if cache_is_valid("packages", cache_key, cache_seconds):
+        for item in iter_cache_items("packages", cache_key, cache_seconds):
             entry = RepoEntry(**item)
             if not entry.checksum_type or not entry.checksum:
                 continue
             _safe_repository_url(base_url, entry.url)
-            packages.append(entry)
-        return packages
+            yield entry
+        return
 
-    root = _primary_from_repomd(base_url)
-    packages = []
-    for package in root.iter():
-        if _local(package.tag) != "package":
-            continue
-        values = {}
-        location = ""
-        checksum_type = ""
-        checksum = ""
-        size = 0
-        for child in package:
-            key = _local(child.tag)
-            if key in ("name", "arch", "summary"):
-                values[key] = (child.text or "").strip()
-            elif key == "version":
-                values.update(child.attrib)
-            elif key == "location":
-                location = child.attrib.get("href", "")
-            elif key == "checksum" and child.attrib.get("pkgid") == "YES":
-                checksum_type = child.attrib.get("type", "")
-                checksum = (child.text or "").strip()
-            elif key == "size":
-                try:
-                    size = int(child.attrib.get("package", 0))
-                except (TypeError, ValueError):
-                    size = 0
-        if values.get("name") and location and checksum_type and checksum:
-            package_url = _safe_repository_url(base_url, location)
-            packages.append(RepoEntry(
-                values["name"], values.get("ver", ""), values.get("rel", ""),
-                values.get("arch", ""), repo_name, package_url,
-                values.get("summary", ""), checksum_type, checksum, size,
-                values.get("epoch", "0"),
-            ))
-    if cache_seconds > 0:
-        save_cache("packages", cache_key, [asdict(package) for package in packages])
-    return packages
+    primary_bytes = _primary_bytes_from_repomd(base_url)
+    with cache_writer("packages", cache_key, cache_seconds > 0) as stream:
+        for _, package in ET.iterparse(io.BytesIO(primary_bytes), events=("end",)):
+            if _local(package.tag) != "package":
+                continue
+            entry = _entry_from_package(package, base_url, repo_name)
+            package.clear()
+            if entry is not None:
+                write_cache_item(stream, asdict(entry))
+                yield entry
+
+
+def load_packages(base_url, repo_name, cache_seconds=86400):
+    return list(iter_packages(base_url, repo_name, cache_seconds))
 
 
 def parse_rpm_filename(url, repo_name):
@@ -241,16 +296,20 @@ def parse_package_names(text):
     return list(dict.fromkeys(names))
 
 
-def search_packages(packages, name_query="", version_query="", imported_names=None):
+def package_matches(package, name_query="", version_query="", imported_names=None):
     queries = [query.strip() for query in (imported_names or []) if query.strip()]
     if name_query.strip():
         queries.append(name_query.strip())
 
-    def query_matches(package, query):
+    def query_matches(query):
         normalized = query.strip().lower()
         rpm_filename = PurePosixPath(package.url.split("?", 1)[0]).name.lower()
         nevra = package.nevra.lower()
-        if normalized in {nevra, rpm_filename, rpm_filename[:-4] if rpm_filename.endswith(".rpm") else rpm_filename}:
+        exact_names = {
+            nevra, rpm_filename,
+            rpm_filename[:-4] if rpm_filename.endswith(".rpm") else rpm_filename,
+        }
+        if normalized in exact_names:
             return True
         if any(character in normalized for character in "*?"):
             return any(fnmatchcase(candidate, normalized) for candidate in (package.name.lower(), nevra, rpm_filename))
@@ -258,13 +317,16 @@ def search_packages(packages, name_query="", version_query="", imported_names=No
             return False
         return normalized in package.name.lower()
 
-    def package_matches(package):
-        return not queries or any(query_matches(package, query) for query in queries)
+    return (
+        (not queries or any(query_matches(query) for query in queries))
+        and _matches(f"{package.version}-{package.release}", version_query)
+    )
 
+
+def search_packages(packages, name_query="", version_query="", imported_names=None):
     results = [
         package for package in packages
-        if package_matches(package)
-        and _matches(f"{package.version}-{package.release}", version_query)
+        if package_matches(package, name_query, version_query, imported_names)
     ]
     return sorted(
         results,

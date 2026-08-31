@@ -1,6 +1,6 @@
 # 银河麒麟服务器多架构包下载工具
 
-版本：`1.4.0`
+版本：`1.5.0`
 
 Debian 包名：`kylin-server-rpm-search`
 
@@ -32,9 +32,10 @@ https://eps-server.openkylin.top/NS/
 - V11 当前提供 `2503`。
 - 新增独立“EPKL 仓库分类”下拉：`main`、`update`、`multi_version`。
 - 选择 `main` 或 `update` 后，维护组件显示“标准软件包”。
-- 选择 `multi_version` 后，维护组件下拉显示该发行版实际可用组件：
-  - V10SP3、V10SP3-2403：`Compiler`、`DB`、`Storage`。
-  - V11 2503：`AI`。
+- 选择 `multi_version` 后，维护组件从远程目录动态发现，不再局限于内置列表。
+- 支持组件下继续出现模块、版本等额外目录层级，并按需显示“组件子目录”和“扩展子目录”下拉。
+- 例如：`ContainerTools → module-docker-ce-20 → aarch64`。
+- 最终仓库 RPM 数量少于等于 30 个时，下拉选择完成后自动显示全部包。
 - EPKL 各发行版的架构、组件和仓库选项与系统源独立，不互相套用。
 
 ### CS 源
@@ -52,7 +53,7 @@ https://update.cs2c.com.cn/CS/
 ## 选择流程
 
 ```text
-产品源 → 系统版本 → 发行版本号 → 系统维护与补丁组件 → 芯片架构 → 软件仓库 → 搜索 → 开始下载 → 下载内容
+产品源 → 系统版本 → 发行版本号 → EPKL 仓库分类 → 系统维护与补丁组件 → 可选子目录 → 芯片架构 → 软件仓库 → 搜索 → 开始下载 → 下载内容
 ```
 
 默认选择：`系统源 → V10 → V10SP3 → os → aarch64 → base/update`。
@@ -65,6 +66,8 @@ https://update.cs2c.com.cn/CS/
 - TXT 既可填写纯包名，也可填写 `name-version-release.arch` 完整 NEVRA 或 `.rpm` 文件名；完整标识采用精确匹配。
 - 版本筛选可选；结果按仓库、RPM 版本、包名排序。
 - 仓库索引支持不缓存、1 小时、24 小时或 7 天缓存。
+- 缓存采用 gzip JSON Lines 磁盘流式格式，逐条读写，避免整份缓存进入内存。
+- 搜索在后台逐包筛选并释放整库数据；大型仓库禁止空条件搜索。
 - 选择区和结果区可上下拖动调整大小。
 - “开始下载”创建后台任务，“下载内容”查看、暂停或恢复任务。
 - 最多 4 个线程并发下载，并强制使用 HTTPS、校验文件长度与仓库摘要。
@@ -82,8 +85,8 @@ python3 -m src.main
 ## 打包与安装
 
 ```bash
-./build.sh 1.4.0
-sudo dpkg -i dist/kylin-server-rpm-search_1.4.0_all.deb
+./build.sh 1.5.0
+sudo dpkg -i dist/kylin-server-rpm-search_1.5.0_all.deb
 ```
 
 安装后可从应用菜单启动，或运行 `kylin-server-rpm-search`。

@@ -1,7 +1,7 @@
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from PyQt5.QtCore import QSettings, QThread, Qt, pyqtSignal
+from PyQt5.QtCore import QSettings, QThread, QTimer, Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QAbstractItemView, QApplication, QComboBox, QFileDialog, QFormLayout,
     QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
@@ -11,7 +11,10 @@ from PyQt5.QtWidgets import (
 
 from .cache import clear_cache
 from .download_dialog import DownloadManagerDialog
-from .repository import load_packages, parse_package_names, search_packages
+from .repository import (
+    iter_packages, list_directory, package_matches, parse_package_names,
+    rpm_version_key,
+)
 
 SYSTEM_BASE_URL = "https://update.cs2c.com.cn/NS/"
 EPKL_BASE_URL = "https://eps-server.openkylin.top/NS/"
@@ -43,8 +46,8 @@ CS_COMPONENTS = {
     ],
 }
 EPKL_MULTI_COMPONENTS = {
-    ("V10", "V10SP3"): ["Compiler", "DB", "Storage"],
-    ("V10", "V10SP3-2403"): ["Compiler", "DB", "Storage"],
+    ("V10", "V10SP3"): ["Compiler", "ContainerTools", "DB", "Storage"],
+    ("V10", "V10SP3-2403"): ["Compiler", "ContainerTools", "DB", "Storage"],
     ("V11", "2503"): ["AI"],
 }
 EPKL_REPOSITORIES = {
@@ -73,24 +76,48 @@ CACHE_OPTIONS = (("不使用缓存", 0), ("缓存 1 小时", 3600), ("缓存 24 
 
 
 class LoadWorker(QThread):
-    loaded = pyqtSignal(list)
+    loaded = pyqtSignal(list, int, bool)
     failed = pyqtSignal(str)
 
-    def __init__(self, urls, cache_seconds):
+    def __init__(
+        self, urls, cache_seconds, name_query="", version_query="",
+        imported_names=None, auto_preview=False,
+    ):
         super().__init__()
         self.urls = urls
         self.cache_seconds = cache_seconds
+        self.name_query = name_query
+        self.version_query = version_query
+        self.imported_names = imported_names or []
+        self.auto_preview = auto_preview
 
     def run(self):
-        packages = []
+        results = []
+        total = 0
         errors = []
         for url, repo_name in self.urls:
             try:
-                packages.extend(load_packages(url, repo_name, self.cache_seconds))
+                for package in iter_packages(url, repo_name, self.cache_seconds):
+                    total += 1
+                    if self.auto_preview:
+                        if total <= 30:
+                            results.append(package)
+                        else:
+                            results.clear()
+                    elif package_matches(
+                        package, self.name_query, self.version_query,
+                        self.imported_names,
+                    ):
+                        results.append(package)
             except Exception as exc:
                 errors.append(f"{repo_name}: {exc}")
-        if packages:
-            self.loaded.emit(packages)
+        if total:
+            results.sort(key=lambda package: (
+                package.repo.lower(),
+                rpm_version_key(f"{package.epoch}:{package.version}-{package.release}"),
+                package.name.lower(),
+            ))
+            self.loaded.emit(results, total, self.auto_preview)
         else:
             self.failed.emit("；".join(errors) or "没有可加载的仓库")
 
@@ -99,9 +126,10 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.settings = QSettings("ziyiliunian", "kylin-server-rpm-search")
-        self.packages = []
         self.imported_names = []
         self.worker = None
+        self.dynamic_multi_path = []
+        self.auto_preview_pending = False
         self.active_download_targets = set()
         self.download_manager = DownloadManagerDialog(self)
         self.download_manager.batch_finished.connect(self._download_finished)
@@ -136,7 +164,12 @@ class MainWindow(QMainWindow):
         self.epkl_category.currentIndexChanged.connect(self._epkl_category_changed)
         self.component = QComboBox()
         self.component.currentIndexChanged.connect(self._component_changed)
+        self.sublevel_one = QComboBox()
+        self.sublevel_one.currentIndexChanged.connect(self._sublevel_one_changed)
+        self.sublevel_two = QComboBox()
+        self.sublevel_two.currentIndexChanged.connect(self._sublevel_two_changed)
         self.arch = QComboBox()
+        self.arch.currentIndexChanged.connect(self._arch_changed)
         self.repo = QListWidget()
         self.repo.setMaximumHeight(104)
         self.repo.setSelectionMode(QAbstractItemView.MultiSelection)
@@ -146,6 +179,12 @@ class MainWindow(QMainWindow):
         self.epkl_category_label = QLabel("EPKL 仓库分类")
         form.addRow(self.epkl_category_label, self.epkl_category)
         form.addRow("系统维护与补丁组件", self.component)
+        self.sublevel_one_label = QLabel("组件子目录")
+        self.sublevel_two_label = QLabel("扩展子目录")
+        form.addRow(self.sublevel_one_label, self.sublevel_one)
+        form.addRow(self.sublevel_two_label, self.sublevel_two)
+        self._set_dynamic_combo_visible(self.sublevel_one_label, self.sublevel_one, False)
+        self._set_dynamic_combo_visible(self.sublevel_two_label, self.sublevel_two, False)
         form.addRow("芯片架构", self.arch)
         form.addRow("软件仓库", self.repo)
         top_layout.addWidget(workflow)
@@ -228,6 +267,81 @@ class MainWindow(QMainWindow):
         combo.setCurrentIndex(index if index >= 0 else 0)
         combo.blockSignals(False)
 
+    @staticmethod
+    def _set_dynamic_combo_visible(label, combo, visible):
+        label.setVisible(visible)
+        combo.setVisible(visible)
+        if not visible:
+            combo.blockSignals(True)
+            combo.clear()
+            combo.blockSignals(False)
+
+    def _multi_component_root(self):
+        return (
+            f"{EPKL_BASE_URL}{self.system_version.currentText()}/"
+            f"{self.release.currentText()}/EPKL/multi_version/"
+            f"{self.component.currentData()[0]}/"
+        )
+
+    def _populate_multi_hierarchy(self):
+        self.dynamic_multi_path = []
+        self._set_dynamic_combo_visible(self.sublevel_one_label, self.sublevel_one, False)
+        self._set_dynamic_combo_visible(self.sublevel_two_label, self.sublevel_two, False)
+        root = self._multi_component_root()
+        children = list_directory(root, self.cache_policy.currentData())
+        known_arches = set(ARCHES.get(
+            ("EPKL", self.system_version.currentText(), self.release.currentText()),
+            ["aarch64", "x86_64"],
+        ))
+        arches = [name for name in children if name in known_arches]
+        if arches:
+            self._set_combo(self.arch, arches, "aarch64")
+            self._repository_selection_completed()
+            return
+        self._set_dynamic_combo_visible(self.sublevel_one_label, self.sublevel_one, True)
+        self._set_combo(self.sublevel_one, children)
+        self._sublevel_one_changed()
+
+    def _sublevel_one_changed(self):
+        if not self.sublevel_one.currentText():
+            return
+        first = self.sublevel_one.currentText()
+        self.dynamic_multi_path = [first]
+        root = self._multi_component_root() + first + "/"
+        children = list_directory(root, self.cache_policy.currentData())
+        known_arches = {"aarch64", "x86_64", "loongarch64", "sw_64", "ppc64le"}
+        arches = [name for name in children if name in known_arches]
+        if arches:
+            self._set_dynamic_combo_visible(self.sublevel_two_label, self.sublevel_two, False)
+            self._set_combo(self.arch, arches, "aarch64")
+            self._repository_selection_completed()
+            return
+        self._set_dynamic_combo_visible(self.sublevel_two_label, self.sublevel_two, True)
+        self._set_combo(self.sublevel_two, children)
+        self._sublevel_two_changed()
+
+    def _sublevel_two_changed(self):
+        if not self.sublevel_two.currentText():
+            return
+        self.dynamic_multi_path = [
+            self.sublevel_one.currentText(), self.sublevel_two.currentText()
+        ]
+        root = self._multi_component_root() + "/".join(self.dynamic_multi_path) + "/"
+        arches = [
+            name for name in list_directory(root, self.cache_policy.currentData())
+            if name in {"aarch64", "x86_64", "loongarch64", "sw_64", "ppc64le"}
+        ]
+        self._set_combo(self.arch, arches or ["aarch64", "x86_64"], "aarch64")
+        self._repository_selection_completed()
+
+    def _repository_selection_completed(self):
+        QTimer.singleShot(0, self._auto_preview_small_repository)
+
+    def _arch_changed(self):
+        component_data = self.component.currentData()
+        if component_data and component_data[1] == "multi":
+            self._repository_selection_completed()
+
     def _source_key(self):
         return self.source.currentData() or "SYSTEM"
 
@@ -293,7 +407,14 @@ class MainWindow(QMainWindow):
         self.component.blockSignals(True)
         self.component.clear()
         if category[1] == "multi":
-            for component in EPKL_MULTI_COMPONENTS.get((system_version, release), []):
+            root = (
+                f"{EPKL_BASE_URL}{system_version}/{release}/EPKL/multi_version/"
+            )
+            try:
+                components = list_directory(root, self.cache_policy.currentData())
+            except Exception:
+                components = EPKL_MULTI_COMPONENTS.get((system_version, release), [])
+            for component in components:
                 self.component.addItem(component, (component, "multi"))
         else:
             self.component.addItem("标准软件包", (category[0], "epkl-standard"))
@@ -307,12 +428,14 @@ class MainWindow(QMainWindow):
         release = self.release.currentText()
         component_data = self.component.currentData() or ("os", "system")
         self.repo.clear()
+        self.dynamic_multi_path = []
+        self._set_dynamic_combo_visible(self.sublevel_one_label, self.sublevel_one, False)
+        self._set_dynamic_combo_visible(self.sublevel_two_label, self.sublevel_two, False)
         if source == "SYSTEM" or (source == "CS" and component_data[1] == "standard"):
             repositories = [("base", "base"), ("update", "updates")]
         elif source == "CS" and component_data[1] == "direct":
             repositories = [("组件仓库", "direct")]
         elif component_data[1] == "multi":
-            self._set_combo(self.arch, ["aarch64", "x86_64"], "aarch64")
             repositories = [("multi_version", "multi-version")]
         else:
             release_arches = ARCHES.get(
@@ -326,6 +449,11 @@ class MainWindow(QMainWindow):
             item.setData(Qt.UserRole, key)
             self.repo.addItem(item)
             item.setSelected(True)
+        if component_data[1] == "multi":
+            try:
+                self._populate_multi_hierarchy()
+            except Exception as exc:
+                self.status.setText(f"多版本目录读取失败：{exc}")
 
     def _import_package_names(self):
         path, _ = QFileDialog.getOpenFileName(self, "导入包名文件", str(Path.home()), "文本文件 (*.txt);;所有文件 (*)")
@@ -368,9 +496,12 @@ class MainWindow(QMainWindow):
             elif source == "CS" and layout == "direct":
                 url = f"{CS_BASE_URL}{system_version}/{release}/{component_path}/{arch}/"
             elif layout == "multi" and repository == "multi-version":
+                dynamic_path = "".join(
+                    f"{part}/" for part in self.dynamic_multi_path if part
+                )
                 url = (
                     f"{EPKL_BASE_URL}{system_version}/{release}/EPKL/multi_version/"
-                    f"{component_path}/{arch}/"
+                    f"{component_path}/{dynamic_path}{arch}/"
                 )
             elif layout == "epkl-standard" and repository == "main":
                 url = f"{EPKL_BASE_URL}{system_version}/{release}/EPKL/main/{arch}/"
@@ -385,25 +516,65 @@ class MainWindow(QMainWindow):
         if self.worker and self.worker.isRunning():
             QMessageBox.information(self, "提示", "仓库索引正在加载，请稍候。")
             return
+        if not (
+            self.name_query.text().strip()
+            or self.version_query.text().strip()
+            or self.imported_names
+        ):
+            QMessageBox.information(
+                self, "提示", "大型仓库搜索请至少输入包名、版本或导入包名文件。"
+            )
+            return
         urls = self._repo_urls()
         if not urls:
             QMessageBox.information(self, "提示", "请至少选择一个软件仓库。")
             return
         self.search_button.setEnabled(False)
         self.status.setText("正在读取仓库索引（优先使用有效缓存）…")
-        self.worker = LoadWorker(urls, self.cache_policy.currentData())
+        self.worker = LoadWorker(
+            urls, self.cache_policy.currentData(), self.name_query.text(),
+            self.version_query.text(), self.imported_names,
+        )
         self.worker.loaded.connect(self._on_loaded)
         self.worker.failed.connect(self._on_load_failed)
         self.worker.finished.connect(self._search_finished)
         self.worker.start()
 
-    def _on_loaded(self, packages):
-        self.packages = packages
-        results = search_packages(packages, self.name_query.text(), self.version_query.text(), self.imported_names)
+    def _auto_preview_small_repository(self):
+        if self.worker and self.worker.isRunning():
+            return
+        urls = self._repo_urls()
+        if not urls:
+            return
+        self.status.setText("正在检查当前仓库的软件包数量…")
+        self.worker = LoadWorker(
+            urls, self.cache_policy.currentData(), auto_preview=True
+        )
+        self.worker.loaded.connect(self._on_loaded)
+        self.worker.failed.connect(self._on_load_failed)
+        self.worker.finished.connect(self._search_finished)
+        self.worker.start()
+
+    def _on_loaded(self, results, total, auto_preview):
+        if self.worker and self.worker.urls != self._repo_urls():
+            self.auto_preview_pending = auto_preview
+            self.status.setText("仓库选择已变化，已忽略过期结果")
+            return
+        if auto_preview:
+            if total <= 30:
+                self._show_results(results)
+                self.status.setText(f"当前仓库仅 {total} 个 RPM，已自动显示全部")
+            else:
+                self.status.setText(f"当前仓库包含 {total} 个 RPM，请输入条件后搜索")
+            return
         self._show_results(results)
-        self.status.setText(f"索引包含 {len(packages)} 个包，匹配 {len(results)} 个")
+        self.status.setText(f"索引包含 {total} 个包，匹配 {len(results)} 个")
 
     def _on_load_failed(self, message):
+        if self.worker and self.worker.urls != self._repo_urls():
+            self.auto_preview_pending = self.worker.auto_preview
+            self.status.setText("仓库选择已变化，已忽略过期错误")
+            return
         self.status.setText("索引加载失败")
         QMessageBox.critical(self, "索引加载失败", message)
 
@@ -412,6 +583,9 @@ class MainWindow(QMainWindow):
         if self.worker:
             self.worker.deleteLater()
             self.worker = None
+        if self.auto_preview_pending:
+            self.auto_preview_pending = False
+            QTimer.singleShot(0, self._auto_preview_small_repository)
 
     def _show_results(self, results):
         self.table.setRowCount(0)
