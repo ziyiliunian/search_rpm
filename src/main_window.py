@@ -173,6 +173,7 @@ class MainWindow(QMainWindow):
         self.workflow = QGroupBox()
         workflow = self.workflow
         form = QFormLayout(workflow)
+        form.setVerticalSpacing(0)
         self.source = QComboBox()
         self.source.addItem("系统源（update.cs2c.com.cn/NS）", "SYSTEM")
         self.source.addItem("EPKL 源（eps-server.openkylin.top/NS）", "EPKL")
@@ -224,12 +225,17 @@ class MainWindow(QMainWindow):
         form.addRow(self.component_label, self.component)
         self.sublevel_one_label = QLabel("组件子目录")
         self.sublevel_two_label = QLabel("扩展子目录")
-        form.addRow(self.sublevel_one_label, self.sublevel_one)
-        form.addRow(self.sublevel_two_label, self.sublevel_two)
+        self.dynamic_directory_section = QWidget()
+        dynamic_form = QFormLayout(self.dynamic_directory_section)
+        dynamic_form.setContentsMargins(0, 0, 0, 0)
+        dynamic_form.addRow(self.sublevel_one_label, self.sublevel_one)
+        dynamic_form.addRow(self.sublevel_two_label, self.sublevel_two)
+        for label, combo in self.custom_directory_combos:
+            dynamic_form.addRow(label, combo)
+        form.addRow(self.dynamic_directory_section)
         self._set_dynamic_combo_visible(self.sublevel_one_label, self.sublevel_one, False)
         self._set_dynamic_combo_visible(self.sublevel_two_label, self.sublevel_two, False)
         for label, combo in self.custom_directory_combos:
-            form.addRow(label, combo)
             self._set_dynamic_combo_visible(label, combo, False)
         self.repo_label = QLabel("软件仓库")
         self.arch_label = QLabel("芯片架构")
@@ -317,14 +323,20 @@ class MainWindow(QMainWindow):
         combo.setCurrentIndex(index if index >= 0 else 0)
         combo.blockSignals(False)
 
-    @staticmethod
-    def _set_dynamic_combo_visible(label, combo, visible):
+    def _set_dynamic_combo_visible(self, label, combo, visible):
         label.setVisible(visible)
         combo.setVisible(visible)
         if not visible:
             combo.blockSignals(True)
             combo.clear()
             combo.blockSignals(False)
+        dynamic_widgets = [
+            self.sublevel_one, self.sublevel_two,
+            *(item for _, item in self.custom_directory_combos),
+        ]
+        self.dynamic_directory_section.setVisible(
+            any(not widget.isHidden() for widget in dynamic_widgets)
+        )
 
     def _multi_component_root(self):
         return (
