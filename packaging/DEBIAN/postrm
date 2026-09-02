@@ -1,5 +1,13 @@
 #!/bin/bash
 set -e
+APP_DIR="/opt/kylin-server-rpm-search"
+if [ -d "$APP_DIR" ]; then
+    find "$APP_DIR" -depth -type d -name __pycache__ -exec rm -rf {} +
+    find "$APP_DIR" -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
+    find "$APP_DIR" -depth -type d -empty -delete
+    rmdir "$APP_DIR/src" 2>/dev/null || true
+    rmdir "$APP_DIR" 2>/dev/null || true
+fi
 if command -v update-desktop-database >/dev/null 2>&1; then update-desktop-database /usr/share/applications || true; fi
 if command -v gtk-update-icon-cache >/dev/null 2>&1; then gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || true; fi
 exit 0

@@ -1,0 +1,14 @@
+#!/bin/bash
+set -e
+
+case "${1:-}" in
+    remove|purge)
+        APP_DIR="/opt/kylin-server-rpm-search"
+        if [ -d "$APP_DIR" ]; then
+            find "$APP_DIR" -depth -type d -name __pycache__ -exec rm -rf {} +
+            find "$APP_DIR" -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
+        fi
+        ;;
+esac
+
+exit 0

@@ -18,7 +18,7 @@ from .cache import (
     cache_is_valid, cache_writer, iter_cache_items, write_cache_item,
 )
 
-USER_AGENT = "kylin-server-rpm-search/1.6.1"
+USER_AGENT = "kylin-server-rpm-search/1.6.2"
 MAX_REPOMD_BYTES = 4 * 1024 * 1024
 MAX_COMPRESSED_METADATA_BYTES = 256 * 1024 * 1024
 MAX_DECOMPRESSED_METADATA_BYTES = 512 * 1024 * 1024
