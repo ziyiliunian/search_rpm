@@ -150,6 +150,7 @@ class MainWindow(QMainWindow):
         self.worker = None
         self.dynamic_multi_path = []
         self.custom_repositories = []
+        self.custom_repository_url = ""
         self.discovery_worker = None
         self.auto_preview_pending = False
         self.active_download_targets = set()
@@ -169,9 +170,8 @@ class MainWindow(QMainWindow):
 
         top = QWidget()
         top_layout = QVBoxLayout(top)
-        workflow = QGroupBox(
-            "工作流程：选择产品源 → 版本/目录层级 → 系统维护与补丁组件 → 软件仓库 → 芯片架构 → 搜索 → 开始下载 → 下载内容"
-        )
+        self.workflow = QGroupBox()
+        workflow = self.workflow
         form = QFormLayout(workflow)
         self.source = QComboBox()
         self.source.addItem("系统源（update.cs2c.com.cn/NS）", "SYSTEM")
@@ -210,15 +210,18 @@ class MainWindow(QMainWindow):
         for index in range(5):
             combo = QComboBox()
             combo.currentIndexChanged.connect(self._custom_directory_changed)
-            label = QLabel(f"目录{index + 1}")
+            label = QLabel(f"源目录{index + 1}")
             self.custom_directory_combos.append((label, combo))
         form.addRow("产品源", self.source)
         form.addRow(self.custom_url_label, self.custom_url_row)
-        form.addRow("系统版本", self.system_version)
-        form.addRow("发行版本号", self.release)
+        self.system_version_label = QLabel("系统版本")
+        self.release_label = QLabel("发行版本号")
+        self.component_label = QLabel("系统维护与补丁组件")
+        form.addRow(self.system_version_label, self.system_version)
+        form.addRow(self.release_label, self.release)
         self.epkl_category_label = QLabel("EPKL 仓库分类")
         form.addRow(self.epkl_category_label, self.epkl_category)
-        form.addRow("系统维护与补丁组件", self.component)
+        form.addRow(self.component_label, self.component)
         self.sublevel_one_label = QLabel("组件子目录")
         self.sublevel_two_label = QLabel("扩展子目录")
         form.addRow(self.sublevel_one_label, self.sublevel_one)
@@ -228,8 +231,10 @@ class MainWindow(QMainWindow):
         for label, combo in self.custom_directory_combos:
             form.addRow(label, combo)
             self._set_dynamic_combo_visible(label, combo, False)
-        form.addRow("软件仓库", self.repo)
-        form.addRow("芯片架构", self.arch)
+        self.repo_label = QLabel("软件仓库")
+        self.arch_label = QLabel("芯片架构")
+        form.addRow(self.repo_label, self.repo)
+        form.addRow(self.arch_label, self.arch)
         top_layout.addWidget(workflow)
 
         search = QHBoxLayout()
@@ -396,24 +401,36 @@ class MainWindow(QMainWindow):
         self.custom_url_label.setVisible(is_custom)
         self.custom_url_row.setVisible(is_custom)
         if is_custom:
+            self.workflow.setTitle(
+                "工作流程：选择产品源 → 源目录选择（源目录1至源目录5） → 搜索 → 开始下载 → 下载内容"
+            )
+            for widget in (
+                self.system_version_label, self.system_version,
+                self.release_label, self.release,
+                self.epkl_category_label, self.epkl_category,
+                self.component_label, self.component,
+                self.repo_label, self.repo,
+                self.arch_label, self.arch,
+            ):
+                widget.setVisible(False)
             self._set_dynamic_combo_visible(self.sublevel_one_label, self.sublevel_one, False)
             self._set_dynamic_combo_visible(self.sublevel_two_label, self.sublevel_two, False)
-            self.epkl_category_label.setVisible(False)
-            self.epkl_category.setVisible(False)
+            self.custom_repository_url = ""
             for label, combo in self.custom_directory_combos:
                 self._set_dynamic_combo_visible(label, combo, False)
-            self._set_combo(self.system_version, ["自定义"], "自定义")
-            self._set_combo(self.release, ["自动发现"], "自动发现")
-            self._set_combo(self.arch, ["目录中自动识别"], "目录中自动识别")
-            self.component.blockSignals(True)
-            self.component.clear()
-            self.component.addItem("最终仓库", ("", "custom"))
-            self.component.blockSignals(False)
-            self.repo.blockSignals(True)
-            self.repo.clear()
-            self.repo.blockSignals(False)
             self._clear_results()
             return
+        self.workflow.setTitle(
+            "工作流程：选择产品源 → 版本/目录层级 → 系统维护与补丁组件 → 软件仓库 → 芯片架构 → 搜索 → 开始下载 → 下载内容"
+        )
+        for widget in (
+            self.system_version_label, self.system_version,
+            self.release_label, self.release,
+            self.component_label, self.component,
+            self.repo_label, self.repo,
+            self.arch_label, self.arch,
+        ):
+            widget.setVisible(True)
         self._set_dynamic_combo_visible(self.sublevel_one_label, self.sublevel_one, False)
         self._set_dynamic_combo_visible(self.sublevel_two_label, self.sublevel_two, False)
         for label, combo in self.custom_directory_combos:
@@ -436,17 +453,17 @@ class MainWindow(QMainWindow):
             return
         self.custom_url.setText(root_url)
         self.custom_repositories = []
+        self.custom_repository_url = ""
         self._clear_results()
         for label, combo in self.custom_directory_combos:
             self._set_dynamic_combo_visible(label, combo, False)
-        self.repo.clear()
         self._load_custom_level(root_url, 0)
 
     def _load_custom_level(self, url, level):
         if level > 5 or (self.discovery_worker and self.discovery_worker.isRunning()):
             return
         self.custom_discover.setEnabled(False)
-        self.status.setText(f"正在检查目录{level + 1 if level < 5 else 5}…")
+        self.status.setText(f"正在检查源目录{level + 1 if level < 5 else 5}…")
         self.discovery_worker = RepositoryDiscoveryWorker(
             url, self.cache_policy.currentData()
         )
@@ -466,15 +483,12 @@ class MainWindow(QMainWindow):
         if self._source_key() != "CUSTOM" or not url.startswith(custom_root):
             return
         if is_repository:
-            self.repo.blockSignals(True)
-            self.repo.clear()
-            self.repo.addItem(url, url)
-            self.repo.blockSignals(False)
+            self.custom_repository_url = url
             self.status.setText("已找到 repodata，可搜索当前仓库")
             self._repository_selection_completed()
             return
         if level >= 5:
-            self.status.setText("已扫描五层，当前路径未发现 repodata")
+            self.status.setText("已扫描源目录五层，当前路径未发现 repodata")
             return
         label, combo = self.custom_directory_combos[level]
         self._set_dynamic_combo_visible(label, combo, bool(names))
@@ -500,6 +514,7 @@ class MainWindow(QMainWindow):
         if changed_level < 0 or self.sender().currentText() in ("", "请选择"):
             return
         self._clear_results()
+        self.custom_repository_url = ""
         for label, combo in self.custom_directory_combos[changed_level + 1:]:
             self._set_dynamic_combo_visible(label, combo, False)
         self.repo.clear()
@@ -641,8 +656,7 @@ class MainWindow(QMainWindow):
     def _repo_urls(self):
         source = self._source_key()
         if source == "CUSTOM":
-            url = self.repo.currentData()
-            return [(url, "custom")] if url else []
+            return [(self.custom_repository_url, "custom")] if self.custom_repository_url else []
         system_version = self.system_version.currentText()
         release = self.release.currentText()
         arch = self.arch.currentText()
