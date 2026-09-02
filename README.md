@@ -1,6 +1,6 @@
 # 银河麒麟服务器多架构包下载工具
 
-版本：`1.6.2`
+版本：`1.6.3`
 
 Debian 包名：`kylin-server-rpm-search`
 
@@ -89,8 +89,8 @@ python3 -m src.main
 ## 打包与安装
 
 ```bash
-./build.sh 1.6.2
-sudo dpkg -i dist/kylin-server-rpm-search_1.6.2_all.deb
+./build.sh 1.6.3
+sudo dpkg -i dist/kylin-server-rpm-search_1.6.3_all.deb
 ```
 
 安装后可从应用菜单启动，或运行 `kylin-server-rpm-search`。
