@@ -173,7 +173,7 @@ class MainWindow(QMainWindow):
         self.workflow = QGroupBox()
         workflow = self.workflow
         form = QFormLayout(workflow)
-        form.setVerticalSpacing(0)
+        form.setVerticalSpacing(10)
         self.source = QComboBox()
         self.source.addItem("系统源（update.cs2c.com.cn/NS）", "SYSTEM")
         self.source.addItem("EPKL 源（eps-server.openkylin.top/NS）", "EPKL")
