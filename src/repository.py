@@ -18,7 +18,7 @@ from .cache import (
     cache_is_valid, cache_writer, iter_cache_items, write_cache_item,
 )
 
-USER_AGENT = "kylin-server-rpm-search/1.5.0"
+USER_AGENT = "kylin-server-rpm-search/1.6.0"
 MAX_REPOMD_BYTES = 4 * 1024 * 1024
 MAX_COMPRESSED_METADATA_BYTES = 256 * 1024 * 1024
 MAX_DECOMPRESSED_METADATA_BYTES = 512 * 1024 * 1024
@@ -101,7 +101,12 @@ def list_directory(url, cache_seconds=86400):
         for href in parser.links:
             if not href.endswith("/"):
                 continue
-            safe_url = _safe_repository_url(url, href)
+            try:
+                safe_url = _safe_repository_url(url, href)
+            except ValueError:
+                continue
+            if safe_url.rstrip("/") == url.rstrip("/"):
+                continue
             name = PurePosixPath(urlsplit(safe_url).path.rstrip("/")).name
             if name and name not in seen:
                 seen.add(name)
@@ -120,6 +125,35 @@ def has_repomd(url):
         return True
     except Exception:
         return False
+
+
+def discover_repositories(root_url, max_depth=5, cache_seconds=86400):
+    root = root_url.rstrip("/") + "/"
+    discovered = []
+    visited = set()
+
+    def visit(url, depth, parts):
+        if url in visited or depth > max_depth:
+            return
+        visited.add(url)
+        if has_repomd(url):
+            discovered.append((tuple(parts), url))
+            return
+        if depth == max_depth:
+            return
+        try:
+            names = list_directory(url, cache_seconds)
+        except Exception:
+            return
+        for name in names:
+            try:
+                child_url = _safe_repository_url(url, name + "/")
+            except ValueError:
+                continue
+            visit(child_url, depth + 1, parts + [name])
+
+    visit(root, 0, [])
+    return discovered
 
 
 def _local(tag):

@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 APP_CACHE_DIR = Path.home() / ".cache" / "kylin-server-rpm-search"
-CACHE_SCHEMA_VERSION = 2
+CACHE_SCHEMA_VERSION = 3
 
 
 def _cache_path(namespace, key):

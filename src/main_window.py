@@ -1,10 +1,10 @@
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 from PyQt5.QtCore import QSettings, QThread, QTimer, Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QAbstractItemView, QApplication, QComboBox, QFileDialog, QFormLayout,
-    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+    QGroupBox, QHBoxLayout, QLabel, QLineEdit,
     QMainWindow, QMessageBox, QPushButton, QSplitter, QTableWidget,
     QTableWidgetItem, QVBoxLayout, QWidget,
 )
@@ -12,8 +12,8 @@ from PyQt5.QtWidgets import (
 from .cache import clear_cache
 from .download_dialog import DownloadManagerDialog
 from .repository import (
-    iter_packages, list_directory, package_matches, parse_package_names,
-    rpm_version_key,
+    has_repomd, iter_packages, list_directory, package_matches,
+    parse_package_names, rpm_version_key,
 )
 
 SYSTEM_BASE_URL = "https://update.cs2c.com.cn/NS/"
@@ -75,6 +75,26 @@ ARCHES = {
 CACHE_OPTIONS = (("不使用缓存", 0), ("缓存 1 小时", 3600), ("缓存 24 小时", 86400), ("缓存 7 天", 604800))
 
 
+class RepositoryDiscoveryWorker(QThread):
+    loaded = pyqtSignal(str, bool, list)
+    failed = pyqtSignal(str)
+
+    def __init__(self, url, cache_seconds):
+        super().__init__()
+        self.url = url
+        self.cache_seconds = cache_seconds
+
+    def run(self):
+        try:
+            is_repository = has_repomd(self.url)
+            names = [] if is_repository else list_directory(
+                self.url, self.cache_seconds
+            )
+            self.loaded.emit(self.url, is_repository, names)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class LoadWorker(QThread):
     loaded = pyqtSignal(list, int, bool)
     failed = pyqtSignal(str)
@@ -129,6 +149,8 @@ class MainWindow(QMainWindow):
         self.imported_names = []
         self.worker = None
         self.dynamic_multi_path = []
+        self.custom_repositories = []
+        self.discovery_worker = None
         self.auto_preview_pending = False
         self.active_download_targets = set()
         self.download_manager = DownloadManagerDialog(self)
@@ -148,14 +170,25 @@ class MainWindow(QMainWindow):
         top = QWidget()
         top_layout = QVBoxLayout(top)
         workflow = QGroupBox(
-            "工作流程：选择产品源 → 系统版本 → 发行版本号 → EPKL 仓库分类 → 系统维护与补丁组件 → 芯片架构 → 软件仓库 → 搜索 → 开始下载 → 下载内容"
+            "工作流程：选择产品源 → 版本/目录层级 → 系统维护与补丁组件 → 软件仓库 → 芯片架构 → 搜索 → 开始下载 → 下载内容"
         )
         form = QFormLayout(workflow)
         self.source = QComboBox()
         self.source.addItem("系统源（update.cs2c.com.cn/NS）", "SYSTEM")
         self.source.addItem("EPKL 源（eps-server.openkylin.top/NS）", "EPKL")
         self.source.addItem("CS 源（update.cs2c.com.cn/CS）", "CS")
+        self.source.addItem("自定义源", "CUSTOM")
         self.source.currentIndexChanged.connect(self._source_changed)
+        self.custom_url = QLineEdit()
+        self.custom_url.setPlaceholderText("HTTPS 根地址，例如 https://mirrors.aliyun.com/epel-archive/")
+        self.custom_discover = QPushButton("发现仓库")
+        self.custom_discover.clicked.connect(self._discover_custom_source)
+        self.custom_url_label = QLabel("自定义源地址")
+        self.custom_url_row = QWidget()
+        custom_row = QHBoxLayout(self.custom_url_row)
+        custom_row.setContentsMargins(0, 0, 0, 0)
+        custom_row.addWidget(self.custom_url)
+        custom_row.addWidget(self.custom_discover)
         self.system_version = QComboBox()
         self.system_version.currentTextChanged.connect(self._system_version_changed)
         self.release = QComboBox()
@@ -170,10 +203,17 @@ class MainWindow(QMainWindow):
         self.sublevel_two.currentIndexChanged.connect(self._sublevel_two_changed)
         self.arch = QComboBox()
         self.arch.currentIndexChanged.connect(self._arch_changed)
-        self.repo = QListWidget()
-        self.repo.setMaximumHeight(104)
-        self.repo.setSelectionMode(QAbstractItemView.MultiSelection)
+        self.repo = QComboBox()
+        self.repo.currentIndexChanged.connect(self._repository_changed)
+        self.repo.currentIndexChanged.connect(self._custom_directory_changed)
+        self.custom_directory_combos = []
+        for index in range(5):
+            combo = QComboBox()
+            combo.currentIndexChanged.connect(self._custom_directory_changed)
+            label = QLabel(f"目录{index + 1}")
+            self.custom_directory_combos.append((label, combo))
         form.addRow("产品源", self.source)
+        form.addRow(self.custom_url_label, self.custom_url_row)
         form.addRow("系统版本", self.system_version)
         form.addRow("发行版本号", self.release)
         self.epkl_category_label = QLabel("EPKL 仓库分类")
@@ -185,8 +225,11 @@ class MainWindow(QMainWindow):
         form.addRow(self.sublevel_two_label, self.sublevel_two)
         self._set_dynamic_combo_visible(self.sublevel_one_label, self.sublevel_one, False)
         self._set_dynamic_combo_visible(self.sublevel_two_label, self.sublevel_two, False)
-        form.addRow("芯片架构", self.arch)
+        for label, combo in self.custom_directory_combos:
+            form.addRow(label, combo)
+            self._set_dynamic_combo_visible(label, combo, False)
         form.addRow("软件仓库", self.repo)
+        form.addRow("芯片架构", self.arch)
         top_layout.addWidget(workflow)
 
         search = QHBoxLayout()
@@ -212,14 +255,16 @@ class MainWindow(QMainWindow):
         self.table = QTableWidget(0, 7)
         self.table.setHorizontalHeaderLabels(["选择", "包名", "版本", "架构", "仓库", "简介", "下载地址"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setEditTriggers(
+            QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed
+        )
         self.table.horizontalHeader().setStretchLastSection(True)
         bottom_layout.addWidget(self.table)
 
         actions = QHBoxLayout()
         select_all = QPushButton("全选结果")
         select_all.clicked.connect(self._select_all)
-        copy_repo = QPushButton("复制仓库地址")
+        copy_repo = QPushButton("复制地址")
         copy_repo.clicked.connect(self._copy_repo_urls)
         self.destination = QLineEdit(str(Path.home() / "Downloads"))
         choose = QPushButton("选择目录")
@@ -338,6 +383,7 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._auto_preview_small_repository)
 
     def _arch_changed(self):
+        self._clear_results()
         component_data = self.component.currentData()
         if component_data and component_data[1] == "multi":
             self._repository_selection_completed()
@@ -346,9 +392,125 @@ class MainWindow(QMainWindow):
         return self.source.currentData() or "SYSTEM"
 
     def _source_changed(self):
+        is_custom = self._source_key() == "CUSTOM"
+        self.custom_url_label.setVisible(is_custom)
+        self.custom_url_row.setVisible(is_custom)
+        if is_custom:
+            self._set_dynamic_combo_visible(self.sublevel_one_label, self.sublevel_one, False)
+            self._set_dynamic_combo_visible(self.sublevel_two_label, self.sublevel_two, False)
+            self.epkl_category_label.setVisible(False)
+            self.epkl_category.setVisible(False)
+            for label, combo in self.custom_directory_combos:
+                self._set_dynamic_combo_visible(label, combo, False)
+            self._set_combo(self.system_version, ["自定义"], "自定义")
+            self._set_combo(self.release, ["自动发现"], "自动发现")
+            self._set_combo(self.arch, ["目录中自动识别"], "目录中自动识别")
+            self.component.blockSignals(True)
+            self.component.clear()
+            self.component.addItem("最终仓库", ("", "custom"))
+            self.component.blockSignals(False)
+            self.repo.blockSignals(True)
+            self.repo.clear()
+            self.repo.blockSignals(False)
+            self._clear_results()
+            return
+        self._set_dynamic_combo_visible(self.sublevel_one_label, self.sublevel_one, False)
+        self._set_dynamic_combo_visible(self.sublevel_two_label, self.sublevel_two, False)
+        for label, combo in self.custom_directory_combos:
+            self._set_dynamic_combo_visible(label, combo, False)
+        self.custom_repositories = []
         versions = SOURCE_SYSTEM_VERSIONS.get(self._source_key(), ["V10"])
         self._set_combo(self.system_version, versions, "V10")
         self._system_version_changed(self.system_version.currentText())
+
+    def _clear_results(self):
+        self.table.setRowCount(0)
+        self.status.setText("已清除旧搜索结果")
+
+    def _discover_custom_source(self):
+        if self.discovery_worker and self.discovery_worker.isRunning():
+            return
+        root_url = self.custom_url.text().strip().rstrip("/") + "/"
+        if not root_url.startswith("https://"):
+            QMessageBox.information(self, "提示", "自定义源必须使用 HTTPS 地址。")
+            return
+        self.custom_url.setText(root_url)
+        self.custom_repositories = []
+        self._clear_results()
+        for label, combo in self.custom_directory_combos:
+            self._set_dynamic_combo_visible(label, combo, False)
+        self.repo.clear()
+        self._load_custom_level(root_url, 0)
+
+    def _load_custom_level(self, url, level):
+        if level > 5 or (self.discovery_worker and self.discovery_worker.isRunning()):
+            return
+        self.custom_discover.setEnabled(False)
+        self.status.setText(f"正在检查目录{level + 1 if level < 5 else 5}…")
+        self.discovery_worker = RepositoryDiscoveryWorker(
+            url, self.cache_policy.currentData()
+        )
+        self.discovery_worker.loaded.connect(
+            lambda loaded_url, is_repo, names: self._custom_level_loaded(
+                level, loaded_url, is_repo, names
+            )
+        )
+        self.discovery_worker.failed.connect(self._custom_repositories_failed)
+        self.discovery_worker.finished.connect(
+            lambda: self.custom_discover.setEnabled(True)
+        )
+        self.discovery_worker.start()
+
+    def _custom_level_loaded(self, level, url, is_repository, names):
+        custom_root = self.custom_url.text().strip().rstrip("/") + "/"
+        if self._source_key() != "CUSTOM" or not url.startswith(custom_root):
+            return
+        if is_repository:
+            self.repo.blockSignals(True)
+            self.repo.clear()
+            self.repo.addItem(url, url)
+            self.repo.blockSignals(False)
+            self.status.setText("已找到 repodata，可搜索当前仓库")
+            self._repository_selection_completed()
+            return
+        if level >= 5:
+            self.status.setText("已扫描五层，当前路径未发现 repodata")
+            return
+        label, combo = self.custom_directory_combos[level]
+        self._set_dynamic_combo_visible(label, combo, bool(names))
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("请选择")
+        combo.addItems(sorted(names))
+        combo.setCurrentIndex(0)
+        combo.blockSignals(False)
+        self.status.setText(f"目录{level + 1} 已加载，请选择后继续")
+
+    def _custom_repositories_failed(self, message):
+        self.status.setText("自定义源扫描失败")
+        QMessageBox.critical(self, "自定义源扫描失败", message)
+
+    def _custom_directory_changed(self):
+        if self._source_key() != "CUSTOM":
+            return
+        changed_level = next((
+            index for index, (_, combo) in enumerate(self.custom_directory_combos)
+            if self.sender() is combo
+        ), -1)
+        if changed_level < 0 or self.sender().currentText() in ("", "请选择"):
+            return
+        self._clear_results()
+        for label, combo in self.custom_directory_combos[changed_level + 1:]:
+            self._set_dynamic_combo_visible(label, combo, False)
+        self.repo.clear()
+        parts = [combo.currentText() for _, combo in self.custom_directory_combos[:changed_level + 1]]
+        url = self.custom_url.text().rstrip("/") + "/" + "/".join(parts) + "/"
+        self._load_custom_level(url, changed_level + 1)
+
+    def _repository_changed(self):
+        self._clear_results()
+        if self._source_key() == "CUSTOM" and self.repo.currentData():
+            self._repository_selection_completed()
 
     def _system_version_changed(self, system_version):
         releases = RELEASES.get((self._source_key(), system_version), [])
@@ -427,6 +589,7 @@ class MainWindow(QMainWindow):
         system_version = self.system_version.currentText()
         release = self.release.currentText()
         component_data = self.component.currentData() or ("os", "system")
+        self._clear_results()
         self.repo.clear()
         self.dynamic_multi_path = []
         self._set_dynamic_combo_visible(self.sublevel_one_label, self.sublevel_one, False)
@@ -444,11 +607,12 @@ class MainWindow(QMainWindow):
             self._set_combo(self.arch, release_arches, "aarch64")
             repository = component_data[0]
             repositories = [(repository, repository)]
+        self.repo.blockSignals(True)
+        self.repo.clear()
         for display, key in repositories:
-            item = QListWidgetItem(display)
-            item.setData(Qt.UserRole, key)
-            self.repo.addItem(item)
-            item.setSelected(True)
+            self.repo.addItem(display, key)
+        self.repo.setCurrentIndex(0)
+        self.repo.blockSignals(False)
         if component_data[1] == "multi":
             try:
                 self._populate_multi_hierarchy()
@@ -476,41 +640,41 @@ class MainWindow(QMainWindow):
 
     def _repo_urls(self):
         source = self._source_key()
+        if source == "CUSTOM":
+            url = self.repo.currentData()
+            return [(url, "custom")] if url else []
         system_version = self.system_version.currentText()
         release = self.release.currentText()
         arch = self.arch.currentText()
         component_path, layout = self.component.currentData() or ("os", "system")
-        urls = []
-        for item in self.repo.selectedItems():
-            repository = item.data(Qt.UserRole)
-            if source == "SYSTEM":
-                url = (
-                    f"{SYSTEM_BASE_URL}{system_version}/{release}/{component_path}"
-                    f"/adv/lic/{repository}/{arch}/"
-                )
-            elif source == "CS" and layout == "standard":
-                url = (
-                    f"{CS_BASE_URL}{system_version}/{release}/{component_path}"
-                    f"/adv/lic/{repository}/{arch}/"
-                )
-            elif source == "CS" and layout == "direct":
-                url = f"{CS_BASE_URL}{system_version}/{release}/{component_path}/{arch}/"
-            elif layout == "multi" and repository == "multi-version":
-                dynamic_path = "".join(
-                    f"{part}/" for part in self.dynamic_multi_path if part
-                )
-                url = (
-                    f"{EPKL_BASE_URL}{system_version}/{release}/EPKL/multi_version/"
-                    f"{component_path}/{dynamic_path}{arch}/"
-                )
-            elif layout == "epkl-standard" and repository == "main":
-                url = f"{EPKL_BASE_URL}{system_version}/{release}/EPKL/main/{arch}/"
-            elif layout == "epkl-standard" and repository == "update":
-                url = f"{EPKL_BASE_URL}{system_version}/{release}/EPKL/update/main/{arch}/"
-            else:
-                continue
-            urls.append((url, f"{source.lower()}-{repository}"))
-        return urls
+        repository = self.repo.currentData()
+        if not repository:
+            return []
+        if source == "SYSTEM":
+            url = (
+                f"{SYSTEM_BASE_URL}{system_version}/{release}/{component_path}"
+                f"/adv/lic/{repository}/{arch}/"
+            )
+        elif source == "CS" and layout == "standard":
+            url = (
+                f"{CS_BASE_URL}{system_version}/{release}/{component_path}"
+                f"/adv/lic/{repository}/{arch}/"
+            )
+        elif source == "CS" and layout == "direct":
+            url = f"{CS_BASE_URL}{system_version}/{release}/{component_path}/{arch}/"
+        elif layout == "multi" and repository == "multi-version":
+            dynamic_path = "".join(f"{part}/" for part in self.dynamic_multi_path if part)
+            url = (
+                f"{EPKL_BASE_URL}{system_version}/{release}/EPKL/multi_version/"
+                f"{component_path}/{dynamic_path}{arch}/"
+            )
+        elif layout == "epkl-standard" and repository == "main":
+            url = f"{EPKL_BASE_URL}{system_version}/{release}/EPKL/main/{arch}/"
+        elif layout == "epkl-standard" and repository == "update":
+            url = f"{EPKL_BASE_URL}{system_version}/{release}/EPKL/update/main/{arch}/"
+        else:
+            return []
+        return [(url, f"{source.lower()}-{repository}")]
 
     def _search(self):
         if self.worker and self.worker.isRunning():
@@ -598,7 +762,10 @@ class MainWindow(QMainWindow):
             self.table.setItem(row, 0, check)
             values = (entry.name, f"{entry.version}-{entry.release}", entry.arch, entry.repo, entry.summary, entry.url)
             for column, value in enumerate(values, 1):
-                self.table.setItem(row, column, QTableWidgetItem(value))
+                cell = QTableWidgetItem(value)
+                if column == 6:
+                    cell.setFlags(cell.flags() | Qt.ItemIsEditable)
+                self.table.setItem(row, column, cell)
 
     def _select_all(self):
         state = Qt.Checked if any(self.table.item(row, 0).checkState() == Qt.Unchecked for row in range(self.table.rowCount())) else Qt.Unchecked
@@ -611,12 +778,15 @@ class MainWindow(QMainWindow):
             self.destination.setText(path)
 
     def _copy_repo_urls(self):
-        urls = [url for url, _ in self._repo_urls()]
+        selected = self.table.selectedItems()
+        urls = [item.text() for item in selected if item.column() == 6]
         if not urls:
-            QMessageBox.information(self, "提示", "请至少选择一个软件仓库。")
+            urls = [url for url, _ in self._repo_urls()]
+        if not urls:
+            QMessageBox.information(self, "提示", "请先选择下载地址或软件仓库。")
             return
-        QApplication.clipboard().setText("\n".join(urls))
-        self.status.setText(f"已复制 {len(urls)} 个仓库地址")
+        QApplication.clipboard().setText("\n".join(dict.fromkeys(urls)))
+        self.status.setText(f"已复制 {len(set(urls))} 个地址")
 
     def _selected_entries(self):
         entries = []
