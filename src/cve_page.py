@@ -4,9 +4,9 @@ from pathlib import Path
 
 from PyQt5.QtCore import QThread, Qt, pyqtSignal
 from PyQt5.QtWidgets import (
-    QCheckBox, QComboBox, QFileDialog, QGroupBox, QHeaderView, QHBoxLayout,
-    QLabel, QLineEdit, QMessageBox, QPushButton, QTableWidget,
-    QTableWidgetItem, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QGroupBox,
+    QHeaderView, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
+    QTableWidget, QTableWidgetItem, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from .cve import normalize_cve_id, query_cve
@@ -66,7 +66,7 @@ class CvePage(QWidget):
         layout = QVBoxLayout(self)
         query_row = QHBoxLayout()
         query_row.addWidget(QLabel("CVE 编号"))
-        self.query_input = QLineEdit("CVE-2026-16389")
+        self.query_input = QLineEdit()
         self.query_input.setPlaceholderText("例如 CVE-2026-16389")
         self.query_input.returnPressed.connect(self._query)
         self.import_button = QPushButton("导入 CVE 文件")
@@ -93,13 +93,15 @@ class CvePage(QWidget):
         layout.addWidget(self.summary_table, 1)
 
         self.details = QTabWidget()
-        self.products_table = QTableWidget(0, 5)
-        self.products_table.setHorizontalHeaderLabels(["", "", "状态（按 CVE）", "", "CVE 查询地址"])
+        product_panel = QWidget()
+        product_layout = QVBoxLayout(product_panel)
+        self.products_table = QTableWidget(0, 6)
+        self.products_table.setHorizontalHeaderLabels(["", "序号", "", "状态", "", "CVE 查询地址"])
         self.products_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.product_header = ProductHeader(self.products_table)
         self.products_table.setHorizontalHeader(self.product_header)
         self.product_header.setStretchLastSection(True)
-        self.select_all_products = QCheckBox("导出 / 全选")
+        self.select_all_products = QCheckBox("全选")
         self.select_all_products.stateChanged.connect(self._toggle_all_products)
         self.product_filter = QComboBox()
         self.product_filter.addItem("受影响产品（全部）", "")
@@ -108,10 +110,26 @@ class CvePage(QWidget):
         self.cve_filter.addItem("关联 CVE（全部）", "")
         self.cve_filter.currentIndexChanged.connect(self._filter_products)
         self.product_header.set_section_widget(0, self.select_all_products)
-        self.product_header.set_section_widget(1, self.product_filter)
-        self.product_header.set_section_widget(3, self.cve_filter)
+        self.product_header.set_section_widget(2, self.product_filter)
+        self.product_header.set_section_widget(4, self.cve_filter)
         self.products_table.itemChanged.connect(self._product_selection_changed)
-        self.details.addTab(self.products_table, "受影响产品")
+        self.products_table.cellDoubleClicked.connect(self._show_product_states)
+        product_layout.addWidget(self.products_table)
+
+        self.export_group = QGroupBox("受影响产品导出")
+        export_layout = QHBoxLayout(self.export_group)
+        self.export_options = {}
+        for key, text in (("summary", "漏洞概况"), ("source_url", "CVE 查询地址")):
+            checkbox = QCheckBox(text)
+            checkbox.setChecked(True)
+            self.export_options[key] = checkbox
+            export_layout.addWidget(checkbox)
+        self.export_button = QPushButton("导出已选产品")
+        self.export_button.clicked.connect(self._export)
+        export_layout.addWidget(self.export_button)
+        self.export_group.setVisible(False)
+        product_layout.addWidget(self.export_group)
+        self.details.addTab(product_panel, "受影响产品")
 
         self.description = self._text_view()
         self.solution = self._text_view()
@@ -138,23 +156,8 @@ class CvePage(QWidget):
         self.components_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.components_table.horizontalHeader().setStretchLastSection(True)
         component_layout.addWidget(self.components_table)
-        layout.addWidget(self.details, 2)
-
-        self.export_group = QGroupBox("受影响产品导出")
-        export_layout = QHBoxLayout(self.export_group)
-        self.export_options = {}
-        for key, text in (("summary", "漏洞概况"), ("source_url", "CVE 查询地址")):
-            checkbox = QCheckBox(text)
-            checkbox.setChecked(True)
-            self.export_options[key] = checkbox
-            export_layout.addWidget(checkbox)
-        self.export_button = QPushButton("导出已选产品")
-        self.export_button.clicked.connect(self._export)
-        export_layout.addWidget(self.export_button)
-        self.export_group.setVisible(False)
-        layout.addWidget(self.export_group)
-        layout.addWidget(QLabel("组件与修复版本（与受影响产品导出相互独立）"))
-        layout.addWidget(component_panel, 1)
+        self.details.addTab(component_panel, "组件与修复版本")
+        layout.addWidget(self.details, 3)
 
         self.status = QLabel("支持单个查询或导入每行一个 CVE 编号的 TXT/TXTX 文件")
         layout.addWidget(self.status)
@@ -310,28 +313,57 @@ class CvePage(QWidget):
             check.setCheckState(Qt.Unchecked)
             check.setData(Qt.UserRole, name)
             self.products_table.setItem(row, 0, check)
-            self.products_table.setItem(row, 1, QTableWidgetItem(name))
+            self.products_table.setItem(row, 1, QTableWidgetItem(str(row + 1)))
+            self.products_table.setItem(row, 2, QTableWidgetItem(name))
             states = [
-                f"{cve_id}：{'、'.join(sorted(values))}"
+                (cve_id, "、".join(sorted(values)))
                 for cve_id, values in sorted(products[name]["states"].items())
             ]
-            self.products_table.setItem(row, 2, QTableWidgetItem("；".join(states)))
-            self.products_table.setItem(row, 3, QTableWidgetItem("、".join(sorted(products[name]["cves"]))))
-            self.products_table.setItem(row, 4, QTableWidgetItem("\n".join(sorted(products[name]["urls"]))))
+            state_item = QTableWidgetItem(states[0][1] if states else "")
+            state_item.setData(Qt.UserRole, states)
+            state_item.setToolTip("双击查看全部 CVE 影响状态")
+            self.products_table.setItem(row, 3, state_item)
+            self.products_table.setItem(row, 4, QTableWidgetItem("、".join(sorted(products[name]["cves"]))))
+            self.products_table.setItem(row, 5, QTableWidgetItem("\n".join(sorted(products[name]["urls"]))))
         self.products_table.blockSignals(False)
         self.products_table.resizeColumnsToContents()
-        self.products_table.setColumnWidth(0, max(110, self.products_table.columnWidth(0)))
-        self.products_table.setColumnWidth(1, max(220, self.products_table.columnWidth(1)))
-        self.products_table.setColumnWidth(3, max(180, self.products_table.columnWidth(3)))
+        self.products_table.setColumnWidth(0, max(75, self.products_table.columnWidth(0)))
+        self.products_table.setColumnWidth(2, max(220, self.products_table.columnWidth(2)))
+        self.products_table.setColumnWidth(4, max(180, self.products_table.columnWidth(4)))
         self.product_header._place_widgets()
         self._product_selection_changed()
+
+    def _show_product_states(self, row, column):
+        if column != 3:
+            return
+        state_item = self.products_table.item(row, 3)
+        states = state_item.data(Qt.UserRole) if state_item else []
+        if not states:
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("CVE 影响状态")
+        dialog.resize(520, 320)
+        dialog_layout = QVBoxLayout(dialog)
+        table = QTableWidget(len(states), 2)
+        table.setHorizontalHeaderLabels(["CVE", "是否影响"])
+        table.setEditTriggers(QTableWidget.NoEditTriggers)
+        table.horizontalHeader().setStretchLastSection(True)
+        for index, (cve_id, state) in enumerate(states):
+            table.setItem(index, 0, QTableWidgetItem(cve_id))
+            table.setItem(index, 1, QTableWidgetItem(state))
+        table.resizeColumnsToContents()
+        dialog_layout.addWidget(table)
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(dialog.reject)
+        dialog_layout.addWidget(buttons)
+        dialog.exec_()
 
     def _filter_products(self):
         product_name = self.product_filter.currentText() if self.product_filter.currentIndex() > 0 else ""
         cve_id = self.cve_filter.currentText() if self.cve_filter.currentIndex() > 0 else ""
         for row in range(self.products_table.rowCount()):
-            product = self.products_table.item(row, 1).text()
-            cves = self.products_table.item(row, 3).text().split("、")
+            product = self.products_table.item(row, 2).text()
+            cves = self.products_table.item(row, 4).text().split("、")
             self.products_table.setRowHidden(
                 row,
                 bool(product_name and product_name != product)
