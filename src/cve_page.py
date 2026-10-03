@@ -95,8 +95,8 @@ class CvePage(QWidget):
         self.details = QTabWidget()
         product_panel = QWidget()
         product_layout = QVBoxLayout(product_panel)
-        self.products_table = QTableWidget(0, 6)
-        self.products_table.setHorizontalHeaderLabels(["", "序号", "", "状态", "", "CVE 查询地址"])
+        self.products_table = QTableWidget(0, 5)
+        self.products_table.setHorizontalHeaderLabels(["", "", "状态", "", "CVE 查询地址"])
         self.products_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.product_header = ProductHeader(self.products_table)
         self.products_table.setHorizontalHeader(self.product_header)
@@ -110,8 +110,8 @@ class CvePage(QWidget):
         self.cve_filter.addItem("关联 CVE（全部）", "")
         self.cve_filter.currentIndexChanged.connect(self._filter_products)
         self.product_header.set_section_widget(0, self.select_all_products)
-        self.product_header.set_section_widget(2, self.product_filter)
-        self.product_header.set_section_widget(4, self.cve_filter)
+        self.product_header.set_section_widget(1, self.product_filter)
+        self.product_header.set_section_widget(3, self.cve_filter)
         self.products_table.itemChanged.connect(self._product_selection_changed)
         self.products_table.cellDoubleClicked.connect(self._show_product_states)
         product_layout.addWidget(self.products_table)
@@ -151,10 +151,20 @@ class CvePage(QWidget):
         component_layout.addLayout(component_actions)
         self.components_table = QTableWidget(0, 8)
         self.components_table.setHorizontalHeaderLabels([
-            "选择", "产品", "组件", "修复版本", "架构", "状态", "安全公告", "发布日期"
+            "选择", "", "", "修复版本", "架构", "状态", "安全公告", "发布日期"
         ])
         self.components_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.components_table.horizontalHeader().setStretchLastSection(True)
+        self.component_header = ProductHeader(self.components_table)
+        self.components_table.setHorizontalHeader(self.component_header)
+        self.component_header.setStretchLastSection(True)
+        self.component_product_filter = QComboBox()
+        self.component_product_filter.addItem("产品（全部）", "")
+        self.component_product_filter.currentIndexChanged.connect(self._filter_components)
+        self.component_name_filter = QComboBox()
+        self.component_name_filter.addItem("组件（全部）", "")
+        self.component_name_filter.currentIndexChanged.connect(self._filter_components)
+        self.component_header.set_section_widget(1, self.component_product_filter)
+        self.component_header.set_section_widget(2, self.component_name_filter)
         component_layout.addWidget(self.components_table)
         self.details.addTab(component_panel, "组件与修复版本")
         layout.addWidget(self.details, 3)
@@ -312,9 +322,10 @@ class CvePage(QWidget):
             check.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
             check.setCheckState(Qt.Unchecked)
             check.setData(Qt.UserRole, name)
+            check.setData(Qt.UserRole + 1, row + 1)
+            check.setText(str(row + 1))
             self.products_table.setItem(row, 0, check)
-            self.products_table.setItem(row, 1, QTableWidgetItem(str(row + 1)))
-            self.products_table.setItem(row, 2, QTableWidgetItem(name))
+            self.products_table.setItem(row, 1, QTableWidgetItem(name))
             states = [
                 (cve_id, "、".join(sorted(values)))
                 for cve_id, values in sorted(products[name]["states"].items())
@@ -322,21 +333,21 @@ class CvePage(QWidget):
             state_item = QTableWidgetItem(states[0][1] if states else "")
             state_item.setData(Qt.UserRole, states)
             state_item.setToolTip("双击查看全部 CVE 影响状态")
-            self.products_table.setItem(row, 3, state_item)
-            self.products_table.setItem(row, 4, QTableWidgetItem("、".join(sorted(products[name]["cves"]))))
-            self.products_table.setItem(row, 5, QTableWidgetItem("\n".join(sorted(products[name]["urls"]))))
+            self.products_table.setItem(row, 2, state_item)
+            self.products_table.setItem(row, 3, QTableWidgetItem("、".join(sorted(products[name]["cves"]))))
+            self.products_table.setItem(row, 4, QTableWidgetItem("\n".join(sorted(products[name]["urls"]))))
         self.products_table.blockSignals(False)
         self.products_table.resizeColumnsToContents()
-        self.products_table.setColumnWidth(0, max(75, self.products_table.columnWidth(0)))
-        self.products_table.setColumnWidth(2, max(220, self.products_table.columnWidth(2)))
-        self.products_table.setColumnWidth(4, max(180, self.products_table.columnWidth(4)))
+        self.products_table.setColumnWidth(0, max(85, self.products_table.columnWidth(0)))
+        self.products_table.setColumnWidth(1, max(220, self.products_table.columnWidth(1)))
+        self.products_table.setColumnWidth(3, max(180, self.products_table.columnWidth(3)))
         self.product_header._place_widgets()
         self._product_selection_changed()
 
     def _show_product_states(self, row, column):
-        if column != 3:
+        if column != 2:
             return
-        state_item = self.products_table.item(row, 3)
+        state_item = self.products_table.item(row, 2)
         states = state_item.data(Qt.UserRole) if state_item else []
         if not states:
             return
@@ -362,8 +373,8 @@ class CvePage(QWidget):
         product_name = self.product_filter.currentText() if self.product_filter.currentIndex() > 0 else ""
         cve_id = self.cve_filter.currentText() if self.cve_filter.currentIndex() > 0 else ""
         for row in range(self.products_table.rowCount()):
-            product = self.products_table.item(row, 2).text()
-            cves = self.products_table.item(row, 4).text().split("、")
+            product = self.products_table.item(row, 1).text()
+            cves = self.products_table.item(row, 3).text().split("、")
             self.products_table.setRowHidden(
                 row,
                 bool(product_name and product_name != product)
@@ -418,7 +429,33 @@ class CvePage(QWidget):
             )
             for column, value in enumerate(values, 1):
                 self.components_table.setItem(row, column, QTableWidgetItem(str(value)))
+        products = sorted({component.get("product", "") for component in result.get("components", []) if component.get("product", "")})
+        components = sorted({component.get("component", "") for component in result.get("components", []) if component.get("component", "")})
+        self.component_product_filter.blockSignals(True)
+        self.component_product_filter.clear()
+        self.component_product_filter.addItem("产品（全部）", "")
+        self.component_product_filter.addItems(products)
+        self.component_product_filter.blockSignals(False)
+        self.component_name_filter.blockSignals(True)
+        self.component_name_filter.clear()
+        self.component_name_filter.addItem("组件（全部）", "")
+        self.component_name_filter.addItems(components)
+        self.component_name_filter.blockSignals(False)
+        self._filter_components()
+        self.component_header._place_widgets()
         self.components_table.resizeColumnsToContents()
+
+    def _filter_components(self):
+        product = self.component_product_filter.currentText() if self.component_product_filter.currentIndex() > 0 else ""
+        component = self.component_name_filter.currentText() if self.component_name_filter.currentIndex() > 0 else ""
+        for row in range(self.components_table.rowCount()):
+            product_value = self.components_table.item(row, 1).text()
+            component_value = self.components_table.item(row, 2).text()
+            self.components_table.setRowHidden(
+                row,
+                bool(product and product != product_value)
+                or bool(component and component != component_value),
+            )
 
     @staticmethod
     def _fill_table(table, rows):

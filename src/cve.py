@@ -5,15 +5,15 @@ from urllib.request import Request, urlopen
 
 CVE_API_URL = "https://support.kylinos.cn/protalweb/security/cve/info"
 CVE_PAGE_URL = "https://support.kylinos.cn/#/security/cveDetail?allTitle={}"
-USER_AGENT = "search_rpm/1.7.3"
+USER_AGENT = "search_rpm/1.7.4"
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 STATUS_NAMES = {
     "0": "不影响", "1": "处理中", "2": "已修复", "3": "不计划修复",
     "4": "不影响", "5": "超出支持范围",
 }
 RISK_NAMES = {
-    "Critical": "严重 Critical", "High": "高 High", "Medium": "中 Medium",
-    "Low": "低 Low", "None": "无 None",
+    "critical": "严重", "high": "高", "medium": "中", "low": "低", "none": "无",
+    "严重": "严重", "高": "高", "中": "中", "低": "低", "无": "无",
 }
 
 
@@ -120,8 +120,8 @@ def query_cve(value):
     return {
         "cve_id": str(data.get("all_title") or cve_id),
         "severity": RISK_NAMES.get(
-            str(data.get("threat_severity") or ""),
-            str(data.get("threat_severity") or ""),
+            str(data.get("threat_severity") or "").strip().lower(),
+            "未知",
         ),
         "published": str(data.get("cve_publicdate") or ""),
         "updated": str(data.get("cve_updatedate") or ""),
