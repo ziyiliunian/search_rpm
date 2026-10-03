@@ -5,7 +5,7 @@ from urllib.request import Request, urlopen
 
 CVE_API_URL = "https://support.kylinos.cn/protalweb/security/cve/info"
 CVE_PAGE_URL = "https://support.kylinos.cn/#/security/cveDetail?allTitle={}"
-USER_AGENT = "search_rpm/1.7.0"
+USER_AGENT = "search_rpm/1.7.1"
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 STATUS_NAMES = {
     "0": "不影响", "1": "处理中", "2": "已修复", "3": "不计划修复",
@@ -61,6 +61,14 @@ def _read_limited(response):
     return data
 
 
+def _string(value):
+    return "" if value is None else str(value)
+
+
+def _dict_items(value):
+    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
 def query_cve(value):
     cve_id = normalize_cve_id(value)
     body = json.dumps({"allTitle": cve_id}).encode("utf-8")
@@ -82,30 +90,32 @@ def query_cve(value):
     if not isinstance(data, dict) or not data.get("all_title"):
         raise LookupError(f"未查询到 {cve_id} 的漏洞信息")
     scores = []
-    for item in data.get("cvss_info_list") or []:
+    for item in _dict_items(data.get("cvss_info_list")):
         scores.append({
-            "provider": str(item.get("provider") or ""),
-            "score": str(item.get("score") or ""),
-            "vector": str(item.get("value") or ""),
+            "provider": _string(item.get("provider")),
+            "score": _string(item.get("score")),
+            "vector": _string(item.get("value")),
         })
     products = []
-    for item in data.get("product_relation_list") or []:
+    for item in _dict_items(data.get("product_relation_list")):
+        state = _string(item.get("state"))
         products.append({
-            "product_name": str(item.get("product_name") or ""),
-            "state": STATUS_NAMES.get(str(item.get("state") or ""), str(item.get("state") or "")),
+            "product_name": _string(item.get("product_name")),
+            "state": STATUS_NAMES.get(state, state),
         })
     components = []
-    for item in data.get("product_component_list") or []:
-        product = item.get("product_info") or {}
+    for item in _dict_items(data.get("product_component_list")):
+        product = item.get("product_info") if isinstance(item.get("product_info"), dict) else {}
+        status = _string(item.get("status"))
         components.append({
-            "product": str(product.get("product_name") or product.get("product_nick_name") or ""),
-            "component": str(item.get("component_name") or item.get("src_name") or ""),
-            "version": str(item.get("version") or ""),
-            "architecture": str(item.get("framework") or ""),
-            "status": STATUS_NAMES.get(str(item.get("status") or ""), str(item.get("status") or "")),
-            "security_advisory": str(item.get("sa_no") or item.get("announcement_no") or ""),
-            "release_date": str(item.get("release_date") or item.get("update_date") or ""),
-            "source_package": str(item.get("packageSourceName") or ""),
+            "product": _string(product.get("product_name") or product.get("product_nick_name")),
+            "component": _string(item.get("component_name") or item.get("src_name")),
+            "version": _string(item.get("version")),
+            "architecture": _string(item.get("framework")),
+            "status": STATUS_NAMES.get(status, status),
+            "security_advisory": _string(item.get("sa_no") or item.get("announcement_no")),
+            "release_date": _string(item.get("release_date") or item.get("update_date")),
+            "source_package": _string(item.get("packageSourceName")),
         })
     return {
         "cve_id": str(data.get("all_title") or cve_id),
