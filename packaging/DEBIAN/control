@@ -1,5 +1,5 @@
 Package: kylin-server-rpm-search
-Version: 1.6.3
+Version: 1.7.0
 Section: net
 Priority: optional
 Architecture: all

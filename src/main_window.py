@@ -3,13 +3,14 @@ from urllib.parse import urljoin, urlsplit
 
 from PyQt5.QtCore import QSettings, QThread, QTimer, Qt, pyqtSignal
 from PyQt5.QtWidgets import (
-    QAbstractItemView, QApplication, QComboBox, QFileDialog, QFormLayout,
-    QGroupBox, QHBoxLayout, QLabel, QLineEdit,
-    QMainWindow, QMessageBox, QPushButton, QSplitter, QTableWidget,
-    QTableWidgetItem, QVBoxLayout, QWidget,
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog,
+    QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
+    QMessageBox, QPushButton, QSplitter, QTableWidget, QTableWidgetItem,
+    QTabWidget, QVBoxLayout, QWidget,
 )
 
 from .cache import clear_cache
+from .cve_page import CvePage
 from .download_dialog import DownloadManagerDialog
 from .repository import (
     has_repomd, iter_packages, list_directory, package_matches,
@@ -101,7 +102,7 @@ class LoadWorker(QThread):
 
     def __init__(
         self, urls, cache_seconds, name_query="", version_query="",
-        imported_names=None, auto_preview=False,
+        imported_names=None, auto_preview=False, latest_only=False,
     ):
         super().__init__()
         self.urls = urls
@@ -110,6 +111,7 @@ class LoadWorker(QThread):
         self.version_query = version_query
         self.imported_names = imported_names or []
         self.auto_preview = auto_preview
+        self.latest_only = latest_only
 
     def run(self):
         results = []
@@ -132,8 +134,18 @@ class LoadWorker(QThread):
             except Exception as exc:
                 errors.append(f"{repo_name}: {exc}")
         if total:
+            if self.latest_only and not self.auto_preview:
+                latest = {}
+                for package in results:
+                    key = (package.name.lower(), package.arch.lower())
+                    version = rpm_version_key(
+                        f"{package.epoch}:{package.version}-{package.release}"
+                    )
+                    current = latest.get(key)
+                    if current is None or version > current[0]:
+                        latest[key] = (version, package)
+                results = [item[1] for item in latest.values()]
             results.sort(key=lambda package: (
-                package.repo.lower(),
                 rpm_version_key(f"{package.epoch}:{package.version}-{package.release}"),
                 package.name.lower(),
             ))
@@ -165,6 +177,13 @@ class MainWindow(QMainWindow):
     def _build_ui(self):
         root = QWidget()
         root_layout = QVBoxLayout(root)
+        title = QLabel("search_rpm    1.7.0")
+        title.setStyleSheet("font-size: 20px; font-weight: bold; padding: 4px 2px;")
+        title.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        root_layout.addWidget(title)
+        self.tabs = QTabWidget()
+        package_page = QWidget()
+        package_layout = QVBoxLayout(package_page)
         splitter = QSplitter(Qt.Vertical)
         splitter.setChildrenCollapsible(False)
 
@@ -251,12 +270,15 @@ class MainWindow(QMainWindow):
         import_button = QPushButton("从文件导入")
         import_button.clicked.connect(self._import_package_names)
         self.import_status = QLabel("未导入文件")
+        self.latest_only = QCheckBox("仅显示每个软件的最新版本")
+        self.latest_only.setToolTip("按包名和架构仅保留 RPM 版本最高的一条记录")
         self.search_button = QPushButton("搜索")
         self.search_button.clicked.connect(self._search)
         search.addWidget(self.name_query, 3)
         search.addWidget(self.version_query, 2)
         search.addWidget(import_button)
         search.addWidget(self.import_status, 2)
+        search.addWidget(self.latest_only)
         search.addWidget(self.search_button)
         top_layout.addLayout(search)
         splitter.addWidget(top)
@@ -265,6 +287,10 @@ class MainWindow(QMainWindow):
         bottom_layout = QVBoxLayout(bottom)
         self.table = QTableWidget(0, 7)
         self.table.setHorizontalHeaderLabels(["选择", "包名", "版本", "架构", "仓库", "简介", "下载地址"])
+        self.table.setSortingEnabled(False)
+        self.result_sort_column = 2
+        self.result_sort_ascending = True
+        self.table.horizontalHeader().sectionClicked.connect(self._sort_results_by_column)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setEditTriggers(
             QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed
@@ -289,7 +315,7 @@ class MainWindow(QMainWindow):
         bottom_layout.addLayout(actions)
         splitter.addWidget(bottom)
         splitter.setSizes([330, 490])
-        root_layout.addWidget(splitter)
+        package_layout.addWidget(splitter)
 
         cache_row = QHBoxLayout()
         self.cache_policy = QComboBox()
@@ -304,9 +330,13 @@ class MainWindow(QMainWindow):
         cache_row.addWidget(self.cache_policy)
         cache_row.addWidget(clear_button)
         cache_row.addStretch()
-        root_layout.addLayout(cache_row)
+        package_layout.addLayout(cache_row)
         self.status = QLabel("就绪")
-        root_layout.addWidget(self.status)
+        package_layout.addWidget(self.status)
+        self.cve_page = CvePage(self)
+        self.tabs.addTab(package_page, "包下载")
+        self.tabs.addTab(self.cve_page, "CVE 查询")
+        root_layout.addWidget(self.tabs)
         self.setCentralWidget(root)
 
     def _initialize_options(self):
@@ -724,6 +754,7 @@ class MainWindow(QMainWindow):
         self.worker = LoadWorker(
             urls, self.cache_policy.currentData(), self.name_query.text(),
             self.version_query.text(), self.imported_names,
+            latest_only=self.latest_only.isChecked(),
         )
         self.worker.loaded.connect(self._on_loaded)
         self.worker.failed.connect(self._on_load_failed)
@@ -777,7 +808,49 @@ class MainWindow(QMainWindow):
             self.auto_preview_pending = False
             QTimer.singleShot(0, self._auto_preview_small_repository)
 
+    def _sort_results_by_column(self, column):
+        if column not in (1, 2) or self.table.rowCount() < 2:
+            return
+        if column == self.result_sort_column:
+            self.result_sort_ascending = not self.result_sort_ascending
+        else:
+            self.result_sort_column = column
+            self.result_sort_ascending = True
+        rows = []
+        for row in range(self.table.rowCount()):
+            entry = self.table.item(row, 0).data(Qt.UserRole)
+            checked = self.table.item(row, 0).checkState()
+            rows.append((entry, checked))
+        if column == 1:
+            key = lambda item: item[0].name.lower()
+        else:
+            key = lambda item: rpm_version_key(
+                f"{item[0].epoch}:{item[0].version}-{item[0].release}"
+            )
+        rows.sort(key=key, reverse=not self.result_sort_ascending)
+        self.table.setSortingEnabled(False)
+        for row, (entry, checked) in enumerate(rows):
+            self.table.item(row, 0).setData(Qt.UserRole, entry)
+            self.table.item(row, 0).setCheckState(checked)
+            values = (entry.name, f"{entry.version}-{entry.release}", entry.arch, entry.repo, entry.summary, entry.url)
+            for column_index, value in enumerate(values, 1):
+                self.table.item(row, column_index).setText(value)
+        self.table.horizontalHeader().setSortIndicator(
+            column, Qt.AscendingOrder if self.result_sort_ascending else Qt.DescendingOrder
+        )
+
     def _show_results(self, results):
+        self.table.setSortingEnabled(False)
+        self.result_sort_column = 2
+        self.result_sort_ascending = True
+        self.table.horizontalHeader().setSortIndicator(2, Qt.AscendingOrder)
+        results = sorted(
+            results,
+            key=lambda package: (
+                rpm_version_key(f"{package.epoch}:{package.version}-{package.release}"),
+                package.name.lower(),
+            ),
+        )
         self.table.setRowCount(0)
         for entry in results:
             row = self.table.rowCount()
@@ -878,6 +951,10 @@ class MainWindow(QMainWindow):
             return
         if self.worker and self.worker.isRunning():
             QMessageBox.information(self, "索引正在加载", "请等待当前仓库索引加载完成后再退出。")
+            event.ignore()
+            return
+        if self.cve_page.has_active_query():
+            QMessageBox.information(self, "CVE 正在查询", "请等待当前 CVE 查询完成后再退出。")
             event.ignore()
             return
         self.download_manager.accept()
