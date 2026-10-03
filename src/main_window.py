@@ -177,7 +177,7 @@ class MainWindow(QMainWindow):
     def _build_ui(self):
         root = QWidget()
         root_layout = QVBoxLayout(root)
-        title = QLabel("search_rpm    1.7.4")
+        title = QLabel("search_rpm    1.7.5")
         title.setStyleSheet("font-size: 20px; font-weight: bold; padding: 4px 2px;")
         title.setTextInteractionFlags(Qt.TextSelectableByMouse)
         root_layout.addWidget(title)

@@ -3,7 +3,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
-USER_AGENT = "kylin-server-rpm-search/1.7.4"
+USER_AGENT = "kylin-server-rpm-search/1.7.5"
 
 
 def download_package(entry, destination, progress=None, resume_event=None):

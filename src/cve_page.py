@@ -98,6 +98,7 @@ class CvePage(QWidget):
         self.products_table = QTableWidget(0, 5)
         self.products_table.setHorizontalHeaderLabels(["", "", "状态", "", "CVE 查询地址"])
         self.products_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.products_table.verticalHeader().setVisible(False)
         self.product_header = ProductHeader(self.products_table)
         self.products_table.setHorizontalHeader(self.product_header)
         self.product_header.setStretchLastSection(True)
