@@ -5,7 +5,7 @@ from urllib.request import Request, urlopen
 
 CVE_API_URL = "https://support.kylinos.cn/protalweb/security/cve/info"
 CVE_PAGE_URL = "https://support.kylinos.cn/#/security/cveDetail?allTitle={}"
-USER_AGENT = "search_rpm/1.7.1"
+USER_AGENT = "search_rpm/1.7.2"
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 STATUS_NAMES = {
     "0": "不影响", "1": "处理中", "2": "已修复", "3": "不计划修复",
